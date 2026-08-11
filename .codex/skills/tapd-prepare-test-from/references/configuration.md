@@ -49,21 +49,21 @@
 - 只有 `environment_type=test` 且 `allow_test_data_mutation=true` 才允许生成写入计划。
 - 登录控件只能使用 Stable ID、Test ID 或 Accessibility ID；缺失时阻断，不猜页面文本。
 
-## 本地凭证
+Token Gate 通过不代表允许数据变更。只有 `environment_type` 严格为 `test` 且 `allow_test_data_mutation` 严格为 `true` 时，后续阶段才允许 HTTP 或受控 SQL 写入；字段缺失或值不匹配时必须阻断写入。
 
 结构示例：
 
-```json
-{
-  "environments": {
-    "example-test": {
-      "account": "LOCAL_ONLY",
-      "password": "LOCAL_ONLY",
-      "authorization": "LOCAL_ONLY"
-    }
-  }
-}
-```
+`token_probe` 是可选的数据驱动规则。存在时必须完整提供：
+
+- `url`：已知会校验鉴权且无业务副作用的具体端点，禁止使用 `api_domain` 根地址。
+- `headers`：有代码或接口契约证据的固定非敏感 Header；禁止 Authorization、Cookie 或其他凭证。
+- `response_code_path`：应用响应码的 JSONPath；不需要应用码时使用空字符串。
+- `success_codes`：允许继续的应用码；不使用应用码时使用空数组。
+- `unauthorized_codes`：表示 Token 失效的应用码；不使用应用码时使用空数组。
+
+代码只解释这些通用字段。任何具体业务码只能出现在被 Git 忽略的环境配置中，禁止写入 Skill、脚本或测试。
+
+## Token Gate
 
 `credentials_ref` 指向当前环境的本地对象。续期成功后只能原子更新对应环境的 `authorization` 字段，不得改动其他环境。所有日志、Markdown、中间 JSON、测试快照和异常信息必须脱敏。
 

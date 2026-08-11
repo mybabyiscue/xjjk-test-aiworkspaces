@@ -37,7 +37,8 @@ output/
 │   │       │   ├── testcase_interface_evidence.json # 用例接口证据
 │   │       │   ├── call_chain_evidence.json  # 调用链证据
 │   │       │   ├── table_evidence.json       # 匹配库表数据
-│   │       │   └── table_resolution.json     # 表解析与确认状态
+│   │       │   ├── table_resolution.json     # 表解析与确认状态
+│   │       │   └── requirement_code_matrix.json # 需求、用例与代码实现矩阵
 │   │       ├── review_context.json            # 输入 Hash、平台、网关与疑问决策
 │   │       ├── code_source_confirmation.json  # 已批准代码源状态快照
 │   │       ├── unit_test_interfaces.md       # 单元测试接口文档 [NEW]
@@ -45,6 +46,9 @@ output/
 │   │       ├── table_information.md          # 表信息文档 [NEW]
 │   │       ├── unresolved_tables.md           # 元数据未确认或冲突表
 │   │       ├── code_prepare_findings.md        # 代码源初审发现
+│   │       ├── requirement_implementation_review.md # 需求实现正确性审查
+│   │       ├── requirement_findings.md          # 需求实现缺失、冲突与不可验证项
+│   │       ├── requirement_review_status.json   # Halt 状态及用户处理决定
 │   │       ├── testcase_evidence_summary.md   # 用例证据摘要
 │   │       ├── code_review_report.md          # 综合代码审查报告
 │   │       ├── evidence_index.json            # 批次与产物 Hash 索引

@@ -21,6 +21,7 @@ REQUIRED_REVIEW_ARTIFACTS: Final[tuple[str, ...]] = (
     "raw/call_chain_evidence.json",
     "raw/table_evidence.json",
     "raw/table_resolution.json",
+    "raw/requirement_code_matrix.json",
     "core_process_interfaces.md",
     "unit_test_interfaces.md",
     "table_information.md",
@@ -28,6 +29,9 @@ REQUIRED_REVIEW_ARTIFACTS: Final[tuple[str, ...]] = (
     "testcase_evidence_summary.md",
     "code_review_report.md",
     "code_prepare_findings.md",
+    "requirement_implementation_review.md",
+    "requirement_findings.md",
+    "requirement_review_status.json",
 )
 
 

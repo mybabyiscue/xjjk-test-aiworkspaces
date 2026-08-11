@@ -116,7 +116,7 @@ python .codex/skills/tapd-code-source-review/scripts/prepare_review_run.py `
 
 记录命令输出的 `<review_run_dir>`。
 
-### 6. 生成证据
+### 6. 生成接口、调用链与表证据底稿
 
 ```powershell
 python .codex/skills/tapd-code-source-review/scripts/analyze_testcase_evidence.py `
@@ -128,7 +128,43 @@ python .codex/skills/tapd-code-source-review/scripts/analyze_testcase_evidence.p
   --policy .codex/skills/tapd-code-source-review/assets/review-policy.json
 ```
 
-### 7. 校验并发布
+### 7. 基于需求审查实现正确性
+
+逐条核对 `requirement.md` 的需求点、验收标准、测试用例与真实代码证据。审查结论只允许：
+
+- `implemented`
+- `partially_implemented`
+- `not_implemented`
+- `implementation_conflict`
+- `unverifiable`
+
+审查人先生成结构化 `<assessment.json>`，每条用例必须包含 `requirement_id`、`acceptance_criterion`、`case_id`、`status`、`rationale` 和真实源码 `evidence`：
+
+```powershell
+python .codex/skills/tapd-code-source-review/scripts/review_requirement_implementation.py `
+  --run-dir <review_run_dir> `
+  --assessment <assessment.json>
+```
+
+脚本生成：
+
+- `raw/requirement_code_matrix.json`
+- `requirement_implementation_review.md`
+- `requirement_findings.md`
+- `requirement_review_status.json`
+
+任一结论不是 `implemented` 时必须立即 Halt，不得执行发布。展示问题并等待用户处理。只有用户明确决定 `resolved` 或 `ignored` 且说明原因后，才允许记录决策：
+
+```powershell
+python .codex/skills/tapd-code-source-review/scripts/resolve_requirement_review.py `
+  --run-dir <review_run_dir> `
+  --decision resolved `
+  --note "用户确认的处理说明"
+```
+
+不得仅凭路由命中判定 `implemented`；必须检查业务规则、边界、异常路径和持久化结果是否与需求一致。
+
+### 8. 校验并发布
 
 ```powershell
 python .codex/skills/tapd-code-source-review/scripts/validate_publish_review.py `
@@ -162,6 +198,7 @@ python .codex/skills/tapd-code-source-review/scripts/approve_testcase_review.py 
 - 代码源、分支、Commit、CodeGraph 和人工确认绑定到同一 source run。
 - 平台、网关证据、疑问决策和输入哈希绑定到同一 review run。
 - 接口方法、完整路由、DTO、调用链和表均有源码或元数据证据。
+- 每条测试用例均有需求实现结论；非完整实现项均已触发 Halt 并绑定用户处理决定。
 - `table_information.md` 只包含指定平台元数据唯一命中的表；未命中表进入 `unresolved_tables.md`。
 - `review_validation.json` 与 `evidence_index.json` 中的哈希全部匹配。
 - 用户最终批准后才生成 `testcase_confirmation.json` 和知识索引记录。

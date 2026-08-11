@@ -121,6 +121,20 @@ public class ActivityController {
         "--metadata-document", str(metadata),
         "--policy", str(SKILL_ROOT / "assets" / "review-policy.json"),
     )
+    assessment = tmp_path / "requirement_assessment.json"
+    write_json(assessment, {"items": [{
+        "requirement_id": "REQ001",
+        "acceptance_criterion": "Activity can be saved",
+        "case_id": "TC001",
+        "status": "implemented",
+        "rationale": "The mapped controller implements the required save entry.",
+        "evidence": [str(source_dir / "ActivityController.java") + ":8"],
+    }]})
+    run_script(
+        "review_requirement_implementation.py",
+        "--run-dir", str(review_run),
+        "--assessment", str(assessment),
+    )
     review_manifest_path = review_run / "source_manifest.json"
     valid_review_manifest = review_manifest_path.read_text(encoding="utf-8")
     invalid_review_manifest = json.loads(valid_review_manifest)

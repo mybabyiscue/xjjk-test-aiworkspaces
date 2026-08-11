@@ -13,7 +13,6 @@
 - `output/code_review/latest/core_process_interfaces.md`
 - `output/code_review/latest/source_manifest.json`
 - `config/environments_config.json`
-- `config/credentials.local.json`
 - `config/connections.json`
 
 ## Stage 4 必出物

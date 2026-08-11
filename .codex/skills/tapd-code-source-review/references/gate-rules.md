@@ -64,3 +64,9 @@
 - 不允许跳过 `AGENTS.md` 读取。
 - 绝不允许在审计与分析阶段以任何理由对业务源码文件（包括 Java, Vue, JS, TS, XML, SQL 等）进行任何的写入、覆写或修改操作。发现代码或注释等任何层面的不一致，必须作为缺陷（Findings）在报告中记录，绝不允许直接在代码中做出订正。
 
+## 需求实现审查 Halt Gate
+
+需求实现矩阵中出现 `partially_implemented`、`not_implemented`、`implementation_conflict` 或 `unverifiable` 时必须停止发布。只有用户明确选择 `resolved` 或 `ignored` 并提供非空说明，才能继续校验；该决定必须写入 `requirement_review_status.json`。
+
+禁止把接口路由命中、关键词命中或调用链存在直接等同于需求完整实现。
+
