@@ -63,18 +63,35 @@ def main() -> int:
         1 for table in raw_tables
         if isinstance(table, dict) and table.get("status") != "confirmed"
     )
+    route_consistency = read_json_object(run_dir / "raw" / "route_consistency.json", "route consistency")
+    route_conflict_count = require_non_negative_count(route_consistency, "route_conflict_count")
+    ambiguous_route_count = require_non_negative_count(route_consistency, "ambiguous_route_count")
+    gateway_evidence_unresolved_count = require_non_negative_count(route_consistency, "gateway_evidence_unresolved_count")
+    blocking_route_issue_count = route_conflict_count + ambiguous_route_count + gateway_evidence_unresolved_count
     validation: dict[str, object] = {
-        "valid": True,
-        "approval_ready": unresolved_count == 0,
+        "valid": blocking_route_issue_count == 0,
+        "approval_ready": unresolved_count == 0 and blocking_route_issue_count == 0,
         "review_run_id": run_dir.name,
         "source_run_id": context.get("source_run_id"),
         "validated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "testcase_hash": testcase_hash,
         "unresolved_table_count": unresolved_count,
-        "requirement_review_status": requirement_status,
+        "route_matched_count": require_non_negative_count(route_consistency, "route_matched_count"),
+        "route_unverified_count": require_non_negative_count(route_consistency, "route_unverified_count"),
+        "route_conflict_count": route_conflict_count,
+        "ambiguous_route_count": ambiguous_route_count,
+        "gateway_evidence_unresolved_count": gateway_evidence_unresolved_count,
+        "blocking_route_issue_count": blocking_route_issue_count,
         "artifacts": hashes,
     }
     write_json(run_dir / "review_validation.json", validation)
+    if blocking_route_issue_count > 0:
+        raise ValueError(
+            "Blocking route consistency issues: "
+            f"conflicts={route_conflict_count}, ambiguous={ambiguous_route_count}, "
+            f"gateway_evidence_unresolved={gateway_evidence_unresolved_count}; "
+            f"see {run_dir / 'raw' / 'route_consistency.json'}"
+        )
     update_evidence_index(run_dir / "evidence_index.json", validation)
     publish_directory(run_dir, output_root / "latest")
     print(str(output_root / "latest"))
@@ -88,6 +105,13 @@ def update_evidence_index(path: Path, validation: dict[str, object]) -> None:
     index["testcase_hash"] = validation["testcase_hash"]
     index["artifacts"] = validation["artifacts"]
     write_json(path, index)
+
+
+def require_non_negative_count(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int) or value < 0:
+        raise ValueError(f"route consistency field {key} must be a non-negative integer")
+    return value
 
 
 def publish_directory(run_dir: Path, latest_dir: Path) -> None:

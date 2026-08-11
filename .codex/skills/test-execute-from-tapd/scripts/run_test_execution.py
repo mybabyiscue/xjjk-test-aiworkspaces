@@ -43,6 +43,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--confirmation", required=True)
     parser.add_argument("--environment-config", required=True)
     parser.add_argument("--environment-name", required=True)
+    parser.add_argument("--expected-business-code", required=True)
     parser.add_argument("--connections")
     parser.add_argument("--read-connection-name")
     parser.add_argument("--write-connection-name")
@@ -451,6 +452,42 @@ def select_environment(config: JsonObject, environment_name: str) -> JsonObject:
     return matches[0]
 
 
+def credentials_for_reference(credentials: JsonObject, reference: str) -> JsonObject:
+    current: object = credentials
+    for segment in reference.split("."):
+        if not isinstance(current, dict):
+            raise LookupError("credentials_ref 指向的凭证对象不存在。")
+        current = current.get(segment)
+    if not isinstance(current, dict):
+        raise LookupError("credentials_ref 指向的凭证对象不存在。")
+    return current
+
+
+def load_local_credentials(workspace: Path) -> JsonObject | None:
+    credentials_path: Path = workspace / "config" / "credentials.local.json"
+    if not credentials_path.is_file():
+        return None
+    return read_json_object(credentials_path, "credentials")
+
+
+def resolve_environment_authentication(environment: JsonObject, credentials_store: JsonObject | None) -> JsonObject:
+    resolved: JsonObject = copy.deepcopy(environment)
+    authorization: object = resolved.get("authorization")
+    if isinstance(authorization, str) and authorization.strip():
+        return resolved
+    credentials_ref: object = resolved.get("credentials_ref")
+    if not isinstance(credentials_ref, str) or not credentials_ref.strip():
+        return resolved
+    if credentials_store is None:
+        raise TypeError(f"environment[{resolved.get('name')}].authorization 必须是非空字符串。")
+    local_credentials: JsonObject = credentials_for_reference(credentials_store, credentials_ref)
+    resolved_authorization: object = local_credentials.get("authorization")
+    if not isinstance(resolved_authorization, str) or not resolved_authorization.strip():
+        raise TypeError(f"environment[{resolved.get('name')}].authorization 必须是非空字符串。")
+    resolved["authorization"] = resolved_authorization
+    return resolved
+
+
 def select_connection(config: JsonObject, connection_name: str, field_name: str) -> JsonObject:
     matches: list[JsonObject] = []
     for index, raw_connection in enumerate(require_list(config.get("connections"), "connections.connections"), start=1):
@@ -646,6 +683,19 @@ def is_token_expired(status: int, response: object, token_error_codes: set[str])
     return raw_code is not None and str(raw_code) in token_error_codes
 
 
+def business_code_assertion(response: object, expected_code: str) -> tuple[bool, str]:
+    if not expected_code:
+        raise ValueError("--expected-business-code 不得为空；必须使用用户本次明确确认的 code 值。")
+    exists: bool = isinstance(response, dict) and "code" in response
+    actual: object = response.get("code") if isinstance(response, dict) else None
+    passed: bool = exists and isinstance(actual, (str, int)) and not isinstance(actual, bool) and str(actual) == expected_code
+    detail: str = json.dumps(
+        {"path": "$.code", "operator": "equals", "expected": expected_code, "actual": actual, "exists": exists},
+        ensure_ascii=False,
+    )
+    return passed, detail
+
+
 def open_database_connection(database_config: JsonObject) -> Connection:
     required_fields: tuple[str, ...] = ("host", "username", "password")
     values: dict[str, str] = {field: require_string(database_config.get(field), f"database.{field}") for field in required_fields}
@@ -704,6 +754,7 @@ def execute_http_data_action(
     action: JsonObject,
     environment: JsonObject,
     token_error_codes: set[str],
+    expected_business_code: str,
 ) -> JsonObject:
     url: str = request_url(environment, action)
     headers: dict[str, str] = build_headers(action, environment)
@@ -716,6 +767,7 @@ def execute_http_data_action(
     expected: JsonObject = require_object(action.get("expected"), "data_action.expected")
     expected_status: int = require_integer(expected.get("http_status"), "data_action.expected.http_status")
     assertions: list[tuple[bool, str]] = [(status == expected_status, f"HTTP status expected={expected_status}, actual={status}")]
+    assertions.append(business_code_assertion(parsed_response, expected_business_code))
     for raw_assertion in require_list(expected.get("response_assertions"), "data_action.expected.response_assertions"):
         assertions.append(assertion_passed(parsed_response, validate_assertion(raw_assertion, "data_action.response_assertion")))
     passed: bool = all(result for result, _ in assertions)
@@ -725,6 +777,8 @@ def execute_http_data_action(
         "type": "http",
         "status": "PASS" if passed else "FAIL",
         "http_status": status,
+        "expected_business_code": expected_business_code,
+        "actual_business_code": parsed_response.get("code") if isinstance(parsed_response, dict) else None,
         "response_body": redact(parsed_response),
         "assertions": [{"passed": result, "detail": detail} for result, detail in assertions],
     }
@@ -774,9 +828,10 @@ def execute_data_action(
     environment: JsonObject,
     write_connection: JsonObject | None,
     token_error_codes: set[str],
+    expected_business_code: str,
 ) -> JsonObject:
     if action.get("type") == "http":
-        return execute_http_data_action(action, environment, token_error_codes)
+        return execute_http_data_action(action, environment, token_error_codes, expected_business_code)
     if write_connection is None:
         raise PermissionError("执行计划包含受控 SQL 动作，但未提供并确认受控写入连接。")
     return execute_sql_data_action(action, write_connection)
@@ -787,6 +842,7 @@ def execute_setup_actions(
     environment: JsonObject,
     write_connection: JsonObject | None,
     token_error_codes: set[str],
+    expected_business_code: str,
 ) -> tuple[list[JsonObject], list[tuple[str, str, JsonObject]], set[str]]:
     results: list[JsonObject] = []
     manifest_rows: list[tuple[str, str, JsonObject]] = []
@@ -795,7 +851,7 @@ def execute_setup_actions(
         action: JsonObject = require_object(raw_action, f"data_actions[{index}]")
         entry_id: str = require_string(action.get("entry_id"), f"data_actions[{index}].entry_id")
         try:
-            result: JsonObject = execute_data_action(action, environment, write_connection, token_error_codes)
+            result: JsonObject = execute_data_action(action, environment, write_connection, token_error_codes, expected_business_code)
         except SystemExit as error:
             result = {
                 "id": action.get("id"),
@@ -824,6 +880,7 @@ def execute_cleanup_actions(
     environment: JsonObject,
     write_connection: JsonObject | None,
     token_error_codes: set[str],
+    expected_business_code: str,
 ) -> tuple[list[JsonObject], list[tuple[str, str, JsonObject]]]:
     results: list[JsonObject] = []
     manifest_rows: list[tuple[str, str, JsonObject]] = []
@@ -833,7 +890,7 @@ def execute_cleanup_actions(
         if entry_id not in cleanup_entry_ids:
             continue
         try:
-            result: JsonObject = execute_data_action(action, environment, write_connection, token_error_codes)
+            result: JsonObject = execute_data_action(action, environment, write_connection, token_error_codes, expected_business_code)
         except SystemExit as error:
             result = {
                 "id": action.get("id"),
@@ -884,6 +941,7 @@ def run_request(
     environment: JsonObject,
     database_config: JsonObject | None,
     token_error_codes: set[str],
+    expected_business_code: str,
 ) -> tuple[JsonObject, list[tuple[str, str, JsonObject]]]:
     url: str = request_url(environment, request)
     headers: dict[str, str] = build_headers(request, environment)
@@ -899,6 +957,7 @@ def run_request(
     assertion_results: list[tuple[bool, str]] = []
     expected_status: int = require_integer(expected.get("http_status"), "request.expected.http_status")
     assertion_results.append((status == expected_status, f"HTTP status expected={expected_status}, actual={status}"))
+    assertion_results.append(business_code_assertion(parsed_response, expected_business_code))
     for raw_assertion in require_list(expected.get("response_assertions"), "request.expected.response_assertions"):
         assertion_results.append(assertion_passed(parsed_response, validate_assertion(raw_assertion, "response_assertion")))
     manifest_rows: list[tuple[str, str, JsonObject]] = []
@@ -931,6 +990,8 @@ def run_request(
         "headers": redact(headers),
         "body": redact(body),
         "http_status": status,
+        "expected_business_code": expected_business_code,
+        "actual_business_code": parsed_response.get("code") if isinstance(parsed_response, dict) else None,
         "response_body": redact(parsed_response),
         "assertions": [{"passed": item_passed, "detail": detail} for item_passed, detail in assertion_results],
         "database_results": database_result_details,
@@ -970,13 +1031,14 @@ def execute_standalone_requests(
     environment: JsonObject,
     database_config: JsonObject | None,
     token_error_codes: set[str],
+    expected_business_code: str,
 ) -> tuple[list[JsonObject], list[tuple[str, str, JsonObject]]]:
     results: list[JsonObject] = []
     manifest_rows: list[tuple[str, str, JsonObject]] = []
     for index, raw_request in enumerate(requests, start=1):
         request: JsonObject = validate_request(raw_request, f"requests[{index}]")
         try:
-            result, request_rows = run_request(request, environment, database_config, token_error_codes)
+            result, request_rows = run_request(request, environment, database_config, token_error_codes, expected_business_code)
             results.append(result)
             manifest_rows.extend(request_rows)
         except SystemExit:
@@ -991,6 +1053,7 @@ def execute_flows(
     environment: JsonObject,
     database_config: JsonObject | None,
     token_error_codes: set[str],
+    expected_business_code: str,
 ) -> tuple[list[JsonObject], list[tuple[str, str, JsonObject]]]:
     flow_results: list[JsonObject] = []
     manifest_rows: list[tuple[str, str, JsonObject]] = []
@@ -1008,7 +1071,7 @@ def execute_flows(
                 continue
             try:
                 prepared_step: JsonObject = apply_dependencies(step, prior_results)
-                result, step_rows = run_request(prepared_step, environment, database_config, token_error_codes)
+                result, step_rows = run_request(prepared_step, environment, database_config, token_error_codes, expected_business_code)
                 step_results.append(result)
                 prior_results[step_id] = result
                 manifest_rows.extend(step_rows)
@@ -1101,6 +1164,7 @@ def lifecycle_failed(results: list[JsonObject]) -> bool:
 
 def main() -> int:
     arguments: argparse.Namespace = parse_arguments()
+    expected_business_code: str = require_string(arguments.expected_business_code, "--expected-business-code")
     workspace: Path = Path(arguments.workspace).resolve()
     if not workspace.is_dir():
         raise NotADirectoryError(f"工作区不存在：{workspace}")
@@ -1128,6 +1192,8 @@ def main() -> int:
         )
     validate_plan(plan, confirmation, assessment, assessment_sha256, canonical_plan)
     environment: JsonObject = select_environment(environment_config, arguments.environment_name)
+    credentials_store: JsonObject | None = load_local_credentials(workspace)
+    environment = resolve_environment_authentication(environment, credentials_store)
     raw_token_error_codes: list[object] = require_list(plan.get("token_error_codes", []), "plan.token_error_codes")
     token_error_codes: set[str] = {require_string(item, "plan.token_error_codes[]") for item in raw_token_error_codes}
     setup_actions: list[object] = require_list(plan.get("data_setup"), "plan.data_setup")
@@ -1190,6 +1256,7 @@ def main() -> int:
             environment,
             write_connection,
             token_error_codes,
+            expected_business_code,
         )
         lifecycle_rows.extend(setup_rows)
         if any(result.get("error_type") == "SystemExit" for result in setup_results):
@@ -1197,10 +1264,10 @@ def main() -> int:
         if lifecycle_failed(setup_results):
             raise RuntimeError("真实测试数据准备失败；已停止接口执行并进入反向清理。")
         interface_results, interface_rows = execute_standalone_requests(
-            require_list(plan.get("requests"), "plan.requests"), environment, read_connection, token_error_codes
+            require_list(plan.get("requests"), "plan.requests"), environment, read_connection, token_error_codes, expected_business_code
         )
         flow_results, flow_rows = execute_flows(
-            require_list(plan.get("flows"), "plan.flows"), environment, read_connection, token_error_codes
+            require_list(plan.get("flows"), "plan.flows"), environment, read_connection, token_error_codes, expected_business_code
         )
     except SystemExit as error:
         pending_error = error
@@ -1214,6 +1281,7 @@ def main() -> int:
                 environment,
                 write_connection,
                 token_error_codes,
+                expected_business_code,
             )
             lifecycle_rows.extend(cleanup_rows)
             if any(result.get("error_type") == "SystemExit" for result in cleanup_results):

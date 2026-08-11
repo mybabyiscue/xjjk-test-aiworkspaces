@@ -9,6 +9,7 @@ import re
 import pytest
 
 from scripts.analyze_testcase_evidence import (
+    analyze_route_consistency,
     apply_gateway_prefixes,
     build_http_mapping_pattern,
     confirmed_tables,
@@ -20,6 +21,8 @@ from scripts.analyze_testcase_evidence import (
     select_business_entries,
     unresolved_tables,
 )
+from scripts.prepare_review_run import parse_gateway_prefix_candidates, validate_gateway_evidence
+from scripts.workflow_contract import validate_gateway_evidence_integrity
 from scripts.workflow_contract import (
     parse_code_url,
     sha256_file,
@@ -113,6 +116,62 @@ def test_gateway_prefix_and_table_resolution_are_isolated() -> None:
     assert updated[0]["controller_route"] == "/mp/activity"
     assert [table["table_name"] for table in confirmed_tables(tables)] == ["confirmed_table"]
     assert [table["table_name"] for table in unresolved_tables(tables)] == ["unknown_table"]
+
+
+def test_gateway_evidence_requires_exact_normalized_prefix(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "gateway.yml"
+    evidence_path.write_text("Path=/wx/mp/**\n", encoding="utf-8")
+
+    assert parse_gateway_prefix_candidates("Path=/wx/mp/**") == ["/wx/mp"]
+    validate_gateway_evidence("/wx/mp", f"{evidence_path}:1", "service_alpha", "service", "")
+    with pytest.raises(ValueError, match="gateway_evidence_unresolved"):
+        validate_gateway_evidence("/wx", f"{evidence_path}:1", "service_alpha", "service", "")
+    with pytest.raises(ValueError, match="gateway_evidence_unresolved"):
+        validate_gateway_evidence("/mp", f"{evidence_path}:1", "service_alpha", "service", "")
+
+
+def test_route_consistency_detects_conflict_match_ambiguity_and_unverified() -> None:
+    entries = [
+        {"service_id": "service_alpha", "controller_route": "/cp/externalInfo/init", "applied_gateway_prefix": "/wx", "gateway_source": "service", "gateway_rule_path_fragment": "", "gateway_evidence": "gateway.yml:1", "composed_route": "/wx/cp/externalInfo/init", "file": "src/Controller.java", "line": 10},
+        {"service_id": "service_alpha", "controller_route": "/cp/group/list", "applied_gateway_prefix": "/wx/mp", "gateway_source": "rule", "gateway_rule_path_fragment": "module_alpha", "gateway_evidence": "gateway.yml:2", "composed_route": "/wx/mp/cp/group/list", "file": "module_alpha/Controller.java", "line": 20},
+        {"service_id": "service_alpha", "controller_route": "/health", "applied_gateway_prefix": "/api", "gateway_source": "service", "gateway_rule_path_fragment": "", "gateway_evidence": "gateway.yml:1", "composed_route": "/api/health", "file": "HealthController.java", "line": 30},
+    ]
+    consumers = [
+        {"service_id": "service_alpha", "route": "/wx/mp/cp/externalInfo/init", "file": "src/api.ts", "line": 5},
+        {"service_id": "service_alpha", "route": "/wx/mp/cp/group/list", "file": "module_alpha/api.ts", "line": 6},
+        {"service_id": "service_alpha", "route": "/wx/cp/group/list", "file": "legacy/api.ts", "line": 7},
+    ]
+
+    result = analyze_route_consistency(entries, consumers)
+    statuses = [str(item["status"]) for item in result["routes"]]
+    assert statuses == ["gateway_route_conflict", "ambiguous_gateway_route", "unverified"]
+    assert result["route_conflict_count"] == 1
+    assert result["ambiguous_route_count"] == 1
+    assert result["route_unverified_count"] == 1
+
+
+def test_route_consistency_matches_confirmed_prefix() -> None:
+    result = analyze_route_consistency(
+        [{"service_id": "service_alpha", "controller_route": "/cp/externalInfo/init", "applied_gateway_prefix": "/wx/mp", "gateway_source": "service", "gateway_rule_path_fragment": "", "gateway_evidence": "gateway.yml:1", "composed_route": "/wx/mp/cp/externalInfo/init", "file": "Controller.java", "line": 10}],
+        [{"service_id": "service_alpha", "route": "/wx/mp/cp/externalInfo/init", "file": "api.ts", "line": 5}],
+    )
+    assert result["routes"][0]["status"] == "matched"
+    assert result["routes"][0]["candidate_prefixes"] == ["/wx/mp"]
+
+
+def test_gateway_evidence_integrity_detects_file_and_line_changes(tmp_path: Path) -> None:
+    evidence_path = tmp_path / "gateway.yml"
+    evidence_path.write_text("Path=/api/**\n", encoding="utf-8")
+    record = validate_gateway_evidence("/api", f"{evidence_path}:1", "service_alpha", "service", "")
+    context = {"gateway_evidence": {"service_alpha": record}, "gateway_evidence_rules": {}}
+    manifest = {"code_sources": []}
+    validate_gateway_evidence_integrity(context, manifest)
+    evidence_path.write_text("Path=/changed/**\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Gateway evidence file changed"):
+        validate_gateway_evidence_integrity(context, manifest)
+    record["evidence_file_sha256"] = sha256_file(evidence_path)
+    with pytest.raises(ValueError, match="Gateway evidence line changed"):
+        validate_gateway_evidence_integrity(context, manifest)
 
 
 def test_gateway_prefix_uses_longest_matching_module_rule() -> None:

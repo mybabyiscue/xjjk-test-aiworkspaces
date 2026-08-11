@@ -1,6 +1,6 @@
 # 评估数据契约
 
-模型只负责基于证据生成结构化中间数据。脚本负责校验、合并和渲染。
+模型只生成结构化映射；脚本负责合并、校验、渲染和生成执行计划。示例中的值都是结构示例，不得复制为实际业务值。
 
 ## 查询计划
 
@@ -8,24 +8,43 @@
 
 ```json
 {
-  "connection": "用户确认的连接名",
+  "connection": "用户确认的只读连接名",
   "queries": [
     {
-      "query_reference": "QRY_UNIQUE_NAME",
-      "database": "真实库名",
-      "table": "真实表名",
-      "purpose": "关联用例和取值目的",
-      "sql": "SELECT required_columns FROM real_database.real_table WHERE evidence_backed_filter LIMIT 20"
+      "query_reference": "QRY_DOMAIN_RESOURCE",
+      "database": "EVIDENCE_DATABASE",
+      "table": "EVIDENCE_TABLE",
+      "purpose": "说明关联用例和取值目的",
+      "max_rows": 20,
+      "sql": "SELECT explicit_column FROM evidence_database.evidence_table WHERE evidenced_filter = %s LIMIT 20"
     }
   ]
 }
 ```
 
-每条 SQL 必须是无注释、无分号的单条 `SELECT`。禁止 `SELECT *`，只选择请求参数或断言需要的列，并使用限制返回数量的条件。
+SQL 必须是无注释、无多语句、带 `LIMIT` 的单条 `SELECT`，禁止 `SELECT *`。库名、表名、列名必须来自表结构证据。
+
+## 结构化证据
+
+所有接口、字段、表、列、断言、反向规则和清理依据都使用同一证据结构：
+
+```json
+{
+  "source_type": "code | requirement | table_metadata",
+  "source_file": "unit_test_interfaces.md",
+  "source_location": "operation_anchor",
+  "source_sha256": "证据文件当前 sha256",
+  "rule_type": "method | path | field | assertion | data | cleanup",
+  "rule_summary": "一句话说明证据证明了什么",
+  "anchor": "operation_anchor"
+}
+```
+
+校验器会确认文件存在、哈希匹配，并检查 `source_location`、`anchor`、`method_name`、`field_name` 或行号能在证据文件中找到。文档示例不得作为业务证据。
 
 ## 模型映射
 
-`model_mapping.json` 的根结构固定为：
+`model_mapping.json` 根结构：
 
 ```json
 {
@@ -37,44 +56,57 @@
 }
 ```
 
-### 接口用例组
+## 接口用例组
 
 ```json
 {
-  "interface_key": "稳定唯一键",
+  "interface_key": "stable_operation_key",
   "interface_evidence": {
-    "service": "服务名",
-    "controller_file": "Controller.java",
-    "controller_method": "methodName",
-    "http_method": "POST",
-    "path": "/完整网关路径"
+    "protocol": "http",
+    "service": "evidence_service",
+    "operation": "operation_anchor",
+    "method": "POST",
+    "path": "/evidence/resource",
+    "response_type": "json",
+    "evidence_references": []
   },
-  "covered_case_keys": ["case_001"],
+  "covered_case_keys": ["case_generated_from_real_case_id"],
   "request_variants": [
     {
-      "name": "TC001 - 用例标题",
-      "variant_type": "positive",
-      "case_keys": ["case_001"],
-      "validation_evidence": [],
-      "headers": {"Content-Type": "application/json"},
-      "authorization_header": "Authorization",
+      "name": "原始用例标题",
+      "variant_type": "negative",
+      "scenario_category": "permission",
+      "scenario_tags": ["permission", "tenant-isolation"],
+      "evidence_references": [],
+      "case_keys": ["case_generated_from_real_case_id"],
+      "headers": {"X-Session": "***"},
+      "auth_header_name": "X-Session",
       "query": {},
       "parameters": [
         {
-          "name": "id",
-          "type": "Long",
+          "name": "resourceId",
+          "location": "path",
+          "type": "string",
           "required": true,
-          "value": 1,
-          "source_type": "database",
-          "source_reference": "table_information.md 对应字段",
-          "query_reference": "QRY_UNIQUE_NAME"
+          "value": "REAL_QUERY_VALUE",
+          "source": {
+            "kind": "database",
+            "reference": "QRY_DOMAIN_RESOURCE.resourceId",
+            "resolver": "copy"
+          },
+          "query_reference": "QRY_DOMAIN_RESOURCE"
         }
       ],
-      "request_body": {"id": 1},
+      "request_body": null,
       "expected": {
-        "http_status": 200,
+        "http_status": 403,
         "response_assertions": [
-          {"path": "$.code", "operator": "equals", "value": "00000"}
+          {
+            "assertion_type": "json_path",
+            "path": "$.result",
+            "operator": "exists",
+            "evidence_reference": {}
+          }
         ],
         "database_assertions": []
       },
@@ -82,11 +114,11 @@
       "cleanup_steps": []
     }
   ],
-  "negative_variant_policy": "no_verifiable_validation_rule",
-  "negative_variant_evidence": ["代码和需求未定义可验证拒绝规则"],
+  "negative_variant_policy": "covered",
+  "negative_variant_evidence": [],
   "audit": {
     "status": "可审核",
-    "evidence_status": "接口、用例和真实数据已绑定",
+    "evidence_status": "接口、用例、真实数据和断言已绑定",
     "reason": "说明证据链",
     "reviewer": "Codex",
     "reviewed_at": "实际 ISO-8601 时间"
@@ -94,121 +126,37 @@
 }
 ```
 
-`source_type` 只能是 `database`、`upstream_response`、`protocol_constant`、`negative_constructed` 或 `unresolved`。可执行接口中禁止 `unresolved`。`database` 必须引用 `real_data_records.json` 中存在的 `query_reference`。
+`variant_type` 只表达执行语义，且只能是 `positive` 或 `negative`；`scenario_category` 直接保留业务分类原值；`scenario_tags` 用于补充标签。接口组可以只有边界、权限、状态、幂等或其他证据驱动场景，场景分类与执行语义不再共用同一个字段。
 
-反向变体必须提供非空 `validation_evidence`。没有明确反向规则时使用 `no_verifiable_validation_rule`，不得自行设计拦截断言。
+## 参数来源
 
-### 不可接口测试用例
+参数来源使用可扩展结构：
 
 ```json
 {
-  "case_key": "case_002",
-  "title": "用例标题",
-  "classification": "ui_only",
-  "reason": "无法通过接口验证的证据原因",
-  "recommended_test_type": "E2E",
-  "precondition": "真实前置条件",
-  "steps": ["步骤"],
-  "expected_results": ["预期结果"],
-  "related_interfaces": [],
-  "parameter_data": [],
-  "missing_evidence": [],
-  "audit": {
-    "status": "可审核",
-    "evidence_status": "已分类",
-    "reason": "说明依据",
-    "reviewer": "Codex",
-    "reviewed_at": "实际 ISO-8601 时间"
+  "source": {
+    "kind": "database | upstream_response | setup_response | environment_config | protocol_constant | dynamic_unique | current_time | manual_preparation | negative_constructed | unresolved",
+    "reference": "可追溯来源",
+    "resolver": "取值方式"
   }
 }
 ```
 
-`classification` 只能是 `ui_only` 或 `blocked`。`blocked` 必须填写 `missing_evidence`。
+当前未实现或不能自动解析的来源必须阻断，不得静默使用默认值。`unresolved` 不能进入正式执行计划。
 
-### 核心流程
+## 数据准备动作
 
-核心流程对象包含 `flow_key`、`name`、`case_keys`、非空 `evidence_references` 和至少两个 `steps`。每个步骤复用接口证据、Header、授权 Header、查询参数、参数、请求体和结构化断言，并额外提供：
+`strategy` 允许 `reuse`、`api_create`、`sql_insert`、`manual_create`。禁止 Mock、Fake、Stub 和占位主键。
 
-- `step_key`：流程内唯一且稳定的步骤键
-- `case_keys`
-- `variant_type`
-- `parameter_dependencies`
-- `interrupt_condition`
-- `cleanup_steps`
+自动创建动作必须具备：
 
-`parameter_dependencies` 每项必须包含 `source_step`、`source_path`、`target` 和 `target_path`。`source_step` 只能引用更早的 `step_key`；`target` 只能是 `body` 或 `query`。
+- `cleanup_policy`：`automatic`、`idempotent`、`not_required_with_evidence`、`manual` 或 `blocked_unsafe`。
+- `depends_on`：显式依赖关系，清理排序不依赖数组倒序。
+- 结构化 `evidence_reference`。
+- `manifest`：库、表和记录摘要；不得包含凭证。
 
-不存在真实调用依赖证据时保持 `core_flows` 为空，并填写 `core_flow_blocker_reason`。
+`sql_insert` 必须是显式列、单条参数化 `INSERT`；`sql_delete` 必须是带限定条件的单条参数化 `DELETE`。清理影响 0 行只有 `idempotent` 策略允许。
 
-## 真实数据准备
+## 核心流程
 
-评估根对象必须包含 `data_preparation.entries`。每个需要真实数据的用例按以下策略登记：
-
-```json
-{
-  "data_preparation": {
-    "entries": [
-      {
-        "id": "target_resource",
-        "case_keys": ["case_001"],
-        "strategy": "api_create",
-        "evidence_references": ["unit_test_interfaces.md#真实创建接口"],
-        "verification_query_reference": "QRY_TARGET_RESOURCE",
-        "isolation_prefix": "TEST_REQ_",
-        "setup": {
-          "id": "create_target_resource",
-          "type": "http",
-          "evidence_reference": "Controller.java#create",
-          "method": "POST",
-          "path": "/gateway/resource/create",
-          "headers": {"Content-Type": "application/json"},
-          "authorization_header": "Authorization",
-          "query": {},
-          "body": {"name": "TEST_REQ_RESOURCE_001"},
-          "expected": {
-            "http_status": 200,
-            "response_assertions": [{"path": "$.code", "operator": "equals", "value": 0}]
-          },
-          "manifest": {
-            "database": "test_database",
-            "table": "resource",
-            "record": {"name": "TEST_REQ_RESOURCE_001"}
-          }
-        },
-        "cleanup": {
-          "id": "delete_target_resource",
-          "type": "sql_delete",
-          "evidence_reference": "table_information.md#resource.test_code",
-          "database": "test_database",
-          "table": "resource",
-          "sql": "DELETE FROM test_database.resource WHERE test_code = %s",
-          "parameters": ["TEST_REQ_RESOURCE_001"],
-          "expected_affected_rows": 1,
-          "manifest": {
-            "database": "test_database",
-            "table": "resource",
-            "record": {"test_code": "TEST_REQ_RESOURCE_001"}
-          }
-        }
-      }
-    ]
-  }
-}
-```
-
-`strategy` 只允许：
-
-- `reuse`：只复用只读查询已返回的真实记录，`setup` 和 `cleanup` 必须为 `null`。
-- `api_create`：使用有源码证据的真实业务 API，必须提供 setup 和 cleanup。
-- `sql_insert`：无稳定 API 且不绕过被测行为时使用受控写连接，setup 只允许显式列、参数化单条 `INSERT`，cleanup 只允许单一 `TEST_` 标识的参数化 `DELETE`。
-- `manual_create`：人工完成后必须重新只读查询；`verification_query_reference` 对应记录数大于 0 才能继续，`setup` 和 `cleanup` 为 `null`。
-
-禁止 Mock、Fake、Stub、Mock seed、`UPDATE`、DDL、存储过程、`TRUNCATE` 和无界 `DELETE`。自动创建策略的 `isolation_prefix` 必须以 `TEST_` 开头，setup/cleanup ID 必须全局唯一且一一对应。
-
-## 覆盖与真实性
-
-- 使用评估壳中的 `case_key`，不得按标题重新排序或重新编号。
-- 每个 `case_key` 必须恰好出现于一个 `interface_cases.covered_case_keys` 或一个 `non_interface_cases.case_key`。
-- HTTP 状态、响应字段、提示文案和数据库断言必须有需求或代码证据。
-- `headers` 中禁止保存 Authorization、Cookie、Token 或其他敏感 Header；需要运行时注入 Token 时只填写 `authorization_header` 的 Header 名称，不需要鉴权时填写空字符串。
-- 查询参数必须明确写入 `query`，禁止根据 `parameters` 或 HTTP Method 推断参数位置。
+核心流程必须有至少两个步骤、结构化证据和显式参数依赖。`parameter_dependencies.target` 支持 `path`、`query`、`header`、`cookie`、`body`。不存在真实调用依赖证据时保持 `core_flows` 为空，并填写 `core_flow_blocker_reason`。

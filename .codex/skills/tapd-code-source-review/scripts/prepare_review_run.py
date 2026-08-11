@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -57,8 +59,8 @@ def main() -> int:
     unknown_platforms = sorted(set(platforms.values()) - available_connections)
     if unknown_platforms:
         raise ValueError(f"Unknown metadata platforms: {unknown_platforms}")
-    validate_gateway_mappings(gateway_prefixes, gateway_evidence)
-    gateway_rules = validate_gateway_rules(
+    gateway_evidence_records = validate_gateway_mappings(gateway_prefixes, gateway_evidence)
+    gateway_rules, gateway_rule_records = validate_gateway_rules(
         service_ids,
         gateway_prefix_rules,
         gateway_evidence_rules,
@@ -111,6 +113,8 @@ def main() -> int:
             "manifest_sha256": sha256_file(manifest_path),
             "source_confirmation_sha256": sha256_file(confirmation_path),
         },
+        "gateway_evidence": gateway_evidence_records,
+        "gateway_evidence_rules": gateway_rule_records,
     }
     write_json(run_dir / "review_context.json", context)
     print(str(run_dir))
@@ -124,24 +128,27 @@ def require_file(path: Path, label: str) -> Path:
     return resolved
 
 
-def validate_gateway_mappings(prefixes: dict[str, str], evidence: dict[str, str]) -> None:
+def validate_gateway_mappings(prefixes: dict[str, str], evidence: dict[str, str]) -> dict[str, dict[str, object]]:
+    records: dict[str, dict[str, object]] = {}
     for service_id, prefix in prefixes.items():
         if not prefix.startswith("/"):
             raise ValueError(f"Gateway prefix must start with '/': {service_id}={prefix}")
         normalized_prefix = normalize_gateway_prefix(prefix)
-        validate_gateway_evidence(normalized_prefix, evidence[service_id], service_id)
+        records[service_id] = validate_gateway_evidence(normalized_prefix, evidence[service_id], service_id, "service", "")
+    return records
 
 
 def validate_gateway_rules(
     service_ids: set[str],
     prefixes: dict[str, str],
     evidence: dict[str, str],
-) -> dict[str, list[dict[str, str]]]:
+) -> tuple[dict[str, list[dict[str, str]]], dict[str, dict[str, object]]]:
     if set(prefixes) != set(evidence):
         missing = sorted(set(prefixes) - set(evidence))
         extra = sorted(set(evidence) - set(prefixes))
         raise ValueError(f"Invalid gateway rule evidence mappings; missing={missing}, extra={extra}")
     rules: dict[str, list[dict[str, str]]] = {}
+    records: dict[str, dict[str, object]] = {}
     for rule_key, prefix in prefixes.items():
         service_id, separator, path_fragment = rule_key.partition(":")
         normalized_service_id = service_id.strip()
@@ -156,7 +163,7 @@ def validate_gateway_rules(
             raise ValueError(f"Gateway rule prefix must start with '/': {rule_key}={prefix}")
         normalized_prefix = normalize_gateway_prefix(prefix)
         evidence_value = evidence[rule_key]
-        validate_gateway_evidence(normalized_prefix, evidence_value, rule_key)
+        records[rule_key] = validate_gateway_evidence(normalized_prefix, evidence_value, rule_key, "rule", normalized_fragment)
         rules.setdefault(normalized_service_id, []).append(
             {
                 "path_fragment": normalized_fragment,
@@ -166,10 +173,10 @@ def validate_gateway_rules(
         )
     for service_rules in rules.values():
         service_rules.sort(key=lambda item: len(item["path_fragment"]), reverse=True)
-    return rules
+    return rules, records
 
 
-def validate_gateway_evidence(prefix: str, evidence_value: str, label: str) -> None:
+def validate_gateway_evidence(prefix: str, evidence_value: str, label: str, source_kind: str, path_fragment: str) -> dict[str, object]:
     path_text, separator, line_text = evidence_value.rpartition(":")
     if not separator or not line_text.isdigit() or int(line_text) < 1:
         raise ValueError(f"Gateway evidence must use path:line: {label}={evidence_value}")
@@ -180,8 +187,65 @@ def validate_gateway_evidence(prefix: str, evidence_value: str, label: str) -> N
     line_number = int(line_text)
     if line_number > len(lines):
         raise ValueError(f"Gateway evidence line is outside the file: {evidence_value}")
-    if prefix and prefix not in lines[line_number - 1]:
-        raise ValueError(f"Gateway evidence line does not contain {prefix}: {evidence_value}")
+    raw_line = lines[line_number - 1]
+    candidates = parse_gateway_prefix_candidates(raw_line)
+    if len(candidates) != 1:
+        raise ValueError(
+            f"gateway_evidence_unresolved: expected exactly one parseable gateway prefix; "
+            f"label={label}; evidence={evidence_value}; candidates={candidates}"
+        )
+    evidence_prefix = normalize_gateway_prefix(candidates[0])
+    if evidence_prefix != prefix:
+        raise ValueError(
+            f"gateway_evidence_unresolved: evidence prefix mismatch; label={label}; "
+            f"expected={prefix}; parsed={evidence_prefix}; evidence={evidence_value}"
+        )
+    return {
+        "evidence": evidence_value,
+        "evidence_file": str(evidence_path.resolve()),
+        "evidence_file_sha256": sha256_file(evidence_path),
+        "evidence_line": line_number,
+        "raw_line": raw_line,
+        "raw_line_sha256": sha256_text(raw_line),
+        "parsed_prefix": evidence_prefix,
+        "input_prefix": prefix,
+        "source_kind": source_kind,
+        "path_fragment": path_fragment,
+    }
+
+
+def parse_gateway_prefix_candidates(raw_line: str) -> list[str]:
+    patterns = gateway_evidence_patterns()
+    candidates: list[str] = []
+    for pattern in patterns:
+        candidates.extend(match.group("path") for match in re.finditer(pattern, raw_line))
+    return list(dict.fromkeys(strip_gateway_wildcards(item) for item in candidates))
+
+
+def gateway_evidence_patterns() -> tuple[str, ...]:
+    policy_path = Path(__file__).resolve().parents[1] / "assets" / "review-policy.json"
+    payload: object = json.loads(policy_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError("review-policy.json must be an object")
+    interface_detection = payload.get("interface_detection")
+    if not isinstance(interface_detection, dict):
+        raise TypeError("review-policy.json.interface_detection must be an object")
+    raw_patterns = interface_detection.get("gateway_evidence_patterns")
+    if not isinstance(raw_patterns, list) or not raw_patterns or not all(isinstance(item, str) and item for item in raw_patterns):
+        raise ValueError("review-policy.json.interface_detection.gateway_evidence_patterns must be non-empty")
+    return tuple(raw_patterns)
+
+
+def strip_gateway_wildcards(value: str) -> str:
+    normalized = value.strip().rstrip("/\r\n")
+    normalized = re.sub(r"/(?:\*\*|\*)$", "", normalized)
+    return normalized or "/"
+
+
+def sha256_text(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def normalize_gateway_prefix(prefix: str) -> str:

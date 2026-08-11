@@ -21,6 +21,7 @@ class LocalHttpHandler(BaseHTTPRequestHandler):
 
     resources: set[str] = set()
     events: list[str] = []
+    auth_headers: list[str | None] = []
 
     def read_json_body(self) -> dict[str, object]:
         content_length: int = int(self.headers.get("Content-Length", "0"))
@@ -37,9 +38,13 @@ class LocalHttpHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self) -> None:
+        self.auth_headers.append(self.headers.get("authorization"))
         if self.path == "/forbidden":
             status: int = 403
             payload: bytes = b'{"code":"TOKEN_EXPIRED"}'
+        elif self.path == "/business-failure":
+            status = 200
+            payload = b'{"code":"A00001","message":"service not found"}'
         elif self.path == "/assertion-failure":
             status = 200
             payload = b'{"code":1}'
@@ -105,6 +110,8 @@ def assessment_payload(path: str) -> dict[str, object]:
                         "name": "positive",
                         "variant_type": "positive",
                         "case_keys": ["case_001"],
+                        "scenario_category": "功能测试",
+                        "scenario_tags": ["smoke"],
                         "headers": {"Accept": "application/json"},
                         "authorization_header": "",
                         "query": {},
@@ -152,7 +159,7 @@ def run_builder(workspace: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def run_runner(workspace: Path, environment_name: str) -> subprocess.CompletedProcess[str]:
+def run_runner(workspace: Path, environment_name: str, expected_business_code: str) -> subprocess.CompletedProcess[str]:
     script_path: Path = Path(__file__).resolve().parents[1] / "scripts" / "run_test_execution.py"
     return subprocess.run(
         [
@@ -170,6 +177,8 @@ def run_runner(workspace: Path, environment_name: str) -> subprocess.CompletedPr
             "environments_config.json",
             "--environment-name",
             environment_name,
+            "--expected-business-code",
+            expected_business_code,
             "--output-dir",
             "output",
             "--manifest",
@@ -248,6 +257,7 @@ class RunnerSmokeTest(unittest.TestCase):
     def setUp(self) -> None:
         LocalHttpHandler.resources = set()
         LocalHttpHandler.events = []
+        LocalHttpHandler.auth_headers = []
         self.server: ThreadingHTTPServer = ThreadingHTTPServer(("127.0.0.1", 0), LocalHttpHandler)
         self.thread: threading.Thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -280,11 +290,74 @@ class RunnerSmokeTest(unittest.TestCase):
             root: Path = Path(temporary_directory)
             self.prepare_workspace(root, "/ok")
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 0, result.stderr)
             report: str = (root / "output" / "interface_test_execution_report.md").read_text(encoding="utf-8")
             self.assertIn("| case_001__1 | case_001 | positive | PASS | 200 |", report)
+
+    def test_business_code_mismatch_fails_even_when_http_and_plan_assertions_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root: Path = Path(temporary_directory)
+            payload: dict[str, object] = assessment_payload("/business-failure")
+            request_variant: object = payload["interface_cases"][0]["request_variants"][0]
+            if not isinstance(request_variant, dict):
+                raise TypeError("Expected one request variant.")
+            expected: object = request_variant.get("expected")
+            if not isinstance(expected, dict):
+                raise TypeError("Expected response contract.")
+            expected["response_assertions"] = [{"path": "$", "operator": "exists"}]
+            domain: str = f"http://127.0.0.1:{self.server.server_port}"
+            write_json(root / "preparation_assessment.json", payload)
+            built: subprocess.CompletedProcess[str] = run_builder(root)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            write_json(root / "confirmation.json", {"approved": True, "testcase_hash": "approved-hash", "code_review_run_id": "review-1"})
+            write_json(root / "environments_config.json", {"environments": [{"name": "local", "api_domain": domain}]})
+
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "00000")
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            report: str = (root / "output" / "interface_test_execution_report.md").read_text(encoding="utf-8")
+            self.assertIn("| case_001__1 | case_001 | positive | FAIL | 200 |", report)
+            self.assertIn('"expected_business_code": "00000"', report)
+            self.assertIn('"actual_business_code": "A00001"', report)
+
+    def test_resolves_authorization_from_local_credentials_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root: Path = Path(temporary_directory)
+            domain: str = f"http://127.0.0.1:{self.server.server_port}"
+            payload: dict[str, object] = assessment_payload("/ok")
+            request_variant: object = payload["interface_cases"][0]["request_variants"][0]
+            if not isinstance(request_variant, dict):
+                raise TypeError("Expected one request variant.")
+            request_variant["auth_header_name"] = "authorization"
+            write_json(root / "preparation_assessment.json", payload)
+            built: subprocess.CompletedProcess[str] = run_builder(root)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            write_json(root / "confirmation.json", {"approved": True, "testcase_hash": "approved-hash", "code_review_run_id": "review-1"})
+            write_json(
+                root / "environments_config.json",
+                {
+                    "environments": [
+                        {
+                            "name": "local",
+                            "api_domain": domain,
+                            "environment_type": "test",
+                            "allow_test_data_mutation": True,
+                            "credentials_ref": "environments.local",
+                        }
+                    ]
+                },
+            )
+            write_json(
+                root / "config" / "credentials.local.json",
+                {"environments": {"local": {"authorization": "Bearer local-token"}}},
+            )
+
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(LocalHttpHandler.auth_headers, ["Bearer local-token"])
 
     def test_rejects_modified_assessment_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -294,7 +367,7 @@ class RunnerSmokeTest(unittest.TestCase):
             assessment["tampered"] = True
             write_json(root / "preparation_assessment.json", assessment)
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("哈希与执行计划记录不一致", result.stderr)
@@ -307,7 +380,7 @@ class RunnerSmokeTest(unittest.TestCase):
             first_request(plan)["path"] = "/tampered"
             write_json(root / "execution_plan.json", plan)
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("字段=plan.requests[0].path", result.stderr)
@@ -320,7 +393,7 @@ class RunnerSmokeTest(unittest.TestCase):
             first_request(plan)["method"] = "POST"
             write_json(root / "execution_plan.json", plan)
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("字段=plan.requests[0].method", result.stderr)
@@ -340,7 +413,7 @@ class RunnerSmokeTest(unittest.TestCase):
             assertions[0]["value"] = 1
             write_json(root / "execution_plan.json", plan)
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("plan.requests[0].expected.response_assertions[0].value", result.stderr)
@@ -353,7 +426,7 @@ class RunnerSmokeTest(unittest.TestCase):
             confirmation["code_review_run_id"] = "review-2"
             write_json(root / "confirmation.json", confirmation)
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("code_review_run_id 不一致", result.stderr)
@@ -366,7 +439,7 @@ class RunnerSmokeTest(unittest.TestCase):
             plan["ready"] = False
             write_json(root / "execution_plan.json", plan)
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("plan.ready", result.stderr)
@@ -375,7 +448,7 @@ class RunnerSmokeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root: Path = Path(temporary_directory)
             self.prepare_workspace(root, "/forbidden")
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
             self.assertEqual(result.returncode, 10, result.stderr)
             self.assertIn("[TOKEN_EXPIRED_ERROR] local", result.stderr)
 
@@ -390,7 +463,7 @@ class RunnerSmokeTest(unittest.TestCase):
             write_json(root / "confirmation.json", {"approved": True, "testcase_hash": "approved-hash", "code_review_run_id": "review-1"})
             write_json(root / "environments_config.json", {"environments": [{"name": "local", "api_domain": domain, "environment_type": "test", "allow_test_data_mutation": True}]})
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(LocalHttpHandler.events, ["setup:TEST_REQ_RESOURCE", "cleanup:TEST_REQ_RESOURCE"])
@@ -410,7 +483,7 @@ class RunnerSmokeTest(unittest.TestCase):
             write_json(root / "confirmation.json", {"approved": True, "testcase_hash": "approved-hash", "code_review_run_id": "review-1"})
             write_json(root / "environments_config.json", {"environments": [{"name": "local", "api_domain": domain, "environment_type": "test", "allow_test_data_mutation": True}]})
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(LocalHttpHandler.events[-1], "cleanup:TEST_REQ_RESOURCE")
@@ -427,7 +500,7 @@ class RunnerSmokeTest(unittest.TestCase):
             write_json(root / "confirmation.json", {"approved": True, "testcase_hash": "approved-hash", "code_review_run_id": "review-1"})
             write_json(root / "environments_config.json", {"environments": [{"name": "local", "api_domain": domain, "environment_type": "test", "allow_test_data_mutation": False}]})
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("allow_test_data_mutation=true", result.stderr)
@@ -450,7 +523,7 @@ class RunnerSmokeTest(unittest.TestCase):
             write_json(root / "confirmation.json", {"approved": True, "testcase_hash": "approved-hash", "code_review_run_id": "review-1"})
             write_json(root / "environments_config.json", {"environments": [{"name": "local", "api_domain": domain, "environment_type": "test", "allow_test_data_mutation": True}]})
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("plan.data_setup[0].method", result.stderr)
@@ -466,7 +539,7 @@ class RunnerSmokeTest(unittest.TestCase):
             write_json(root / "confirmation.json", {"approved": True, "testcase_hash": "approved-hash", "code_review_run_id": "review-1"})
             write_json(root / "environments_config.json", {"environments": [{"name": "local", "api_domain": domain, "environment_type": "test", "allow_test_data_mutation": True}]})
 
-            result: subprocess.CompletedProcess[str] = run_runner(root, "local")
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
 
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn("TEST_REQ_RESOURCE", LocalHttpHandler.resources)

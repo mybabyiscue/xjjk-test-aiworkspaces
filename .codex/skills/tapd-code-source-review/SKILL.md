@@ -10,6 +10,8 @@ description: 拉取并人工确认 TAPD 需求相关代码源，使用 CodeGraph
 - 只使用真实源码、CodeGraph 和用户确认平台的元数据作为证据。
 - 测试用例已包含真实路由时按路由根强过滤；需求阶段未提供路由时，按业务词召回并仅保留达到既有评分门槛且绑定到用例的入口。
 - 所有中间结果写入带 ID 的 `runs/` 目录；禁止把 `latest/` 当作工作目录。
+- 网关证据必须进行路径前缀精确解析和证据文件/行哈希校验；禁止使用普通字符串包含判断。
+- 必须生成 `raw/route_consistency.json`，校验 Controller 完整路由与前端真实消费者路径的一致性。
 - 任一代码源失败、CodeGraph 不健康、代码源未审批、平台未确认、疑问未处理或元数据缺失时立即失败。
 - HTTP Method 只来自服务端框架注解。表字段只来自指定连接的元数据精确匹配。
 - 不生成 Mock 数据或推测字段，不修改业务源码。
@@ -82,14 +84,14 @@ python .codex/skills/tapd-code-source-review/scripts/approve_code_source.py `
 
 每个服务都必须提供：
 
-- `--platform service_001=鲨域测试`
-- `--gateway-prefix service_001=/product`
-- `--gateway-evidence service_001=path/to/gateway.yml:42`
+- `--platform service_alpha=<用户确认的平台>`
+- `--gateway-prefix service_alpha=/gateway-a`
+- `--gateway-evidence service_alpha=path/to/gateway.yml:42`
 
 同一代码源包含多个独立网关服务时，服务级前缀使用 `/`，并按源码路径增加模块覆盖规则：
 
-- `--gateway-prefix-rule service_001:mall4cloud-product=/product`
-- `--gateway-evidence-rule service_001:mall4cloud-product=path/to/evidence:42`
+- `--gateway-prefix-rule service_alpha:module_alpha=/gateway-a/module-b`
+- `--gateway-evidence-rule service_alpha:module_alpha=path/to/evidence:42`
 
 规则按源码文件路径最长匹配，未命中时回退到服务级前缀。每条规则都必须有包含对应前缀的真实证据行。
 
@@ -104,9 +106,9 @@ python .codex/skills/tapd-code-source-review/scripts/prepare_review_run.py `
   --requirement output/requirement.md `
   --questions output/questions.md `
   --metadata-document .codex/skills/xjjk-yewu-sql/state/documents/metadata_document.json `
-  --platform service_001=鲨域测试 `
-  --gateway-prefix service_001=/product `
-  --gateway-evidence service_001=path/to/gateway.yml:42 `
+  --platform service_alpha="<用户确认的平台>" `
+  --gateway-prefix service_alpha=/gateway-a `
+  --gateway-evidence service_alpha=path/to/gateway.yml:42 `
   --questions-decision resolved `
   --questions-note "疑问已由代码证据闭环" `
   --output-root output/code_review
@@ -173,7 +175,9 @@ python .codex/skills/tapd-code-source-review/scripts/validate_publish_review.py 
 
 只有校验通过的完整批次才能发布到 `output/code_review/latest/`。
 
-### 9. 最终审批
+发布前必须确认 `gateway_route_conflict`、`ambiguous_gateway_route`、`gateway_evidence_unresolved` 均为 0；否则保留当前 `runs/<review_run_id>/`，写入失败的 `review_validation.json`，不得更新 `latest/`。
+
+### 8. 最终审批
 
 展示接口、表、未闭环问题和三个主要文档，等待用户明确批准。批准后执行：
 
@@ -186,6 +190,8 @@ python .codex/skills/tapd-code-source-review/scripts/approve_testcase_review.py 
   --confirmation-path output/latest/testcase_confirmation.json `
   --knowledge-root knowledge
 ```
+
+最终审批前必须再次校验证据文件和证据行哈希，并确认路由阻断计数均为 0。不得绕过发布校验直接审批。
 
 ## 完成条件
 

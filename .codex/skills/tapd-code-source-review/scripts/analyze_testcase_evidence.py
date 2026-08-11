@@ -70,6 +70,7 @@ def main() -> int:
     frontend_calls = scan_frontend_calls(other_files, frontend_route_pattern, set(require_string_list(interface_policy, "excluded_route_segments")), generic_tokens, identifier_minimum_length)
     entries = scan_java_entries(java_files, dto_index, http_mapping_pattern, method_declaration_pattern, interface_policy, generic_tokens, minimum_chinese_ngram_length, maximum_chinese_ngram_length, identifier_minimum_length)
     entries = apply_gateway_prefixes(entries, services)
+    route_consistency = analyze_route_consistency(entries, frontend_calls)
     changed_source_ranges = collect_changed_source_ranges(services)
     selected_entries = select_business_entries(entries, cases, changed_source_ranges)
     mapped_entries = map_cases_to_entries(selected_entries, cases, matching_policy)
@@ -80,6 +81,7 @@ def main() -> int:
 
     write_json(raw_dir / "parsed_test_cases.json", {"cases": cases})
     write_json(raw_dir / "code_entry_index.json", {"entries": entries, "frontend_calls": frontend_calls})
+    write_json(raw_dir / "route_consistency.json", route_consistency)
     write_json(raw_dir / "testcase_interface_evidence.json", {"interfaces": mapped_entries})
     write_json(raw_dir / "call_chain_evidence.json", {"call_chains": call_chains})
     write_json(raw_dir / "table_evidence.json", {"tables": tables})
@@ -90,7 +92,7 @@ def main() -> int:
     write_table_report(run_dir / "table_information.md", confirmed_tables(tables), findings, require_positive_int(table_policy, "max_report_fields"))
     write_unresolved_tables(run_dir / "unresolved_tables.md", unresolved_tables(tables))
     write_summary(run_dir / "testcase_evidence_summary.md", cases, mapped_entries, tables, findings)
-    update_code_review_report(run_dir / "code_review_report.md", cases, mapped_entries, tables, findings)
+    update_code_review_report(run_dir / "code_review_report.md", cases, mapped_entries, tables, findings, route_consistency)
     write_contract_json(run_dir / "review_status.json", {
         "status": "completed",
         "review_run_id": run_dir.name,
@@ -99,6 +101,7 @@ def main() -> int:
         "table_count": len(tables),
         "unresolved_table_count": len(unresolved_tables(tables)),
         "unclosed_case_count": len(findings),
+        "route_consistency": route_consistency,
     })
     context_inputs = review_context.get("inputs")
     if not isinstance(context_inputs, dict):
@@ -114,6 +117,7 @@ def main() -> int:
         "interface_count": len(mapped_entries),
         "table_count": len(tables),
         "unclosed_case_count": len(findings),
+        "route_consistency": route_consistency,
     }, ensure_ascii=False))
     return 0
 
@@ -364,9 +368,15 @@ def apply_gateway_prefixes(
             raise ValueError(f"Missing gateway prefix for service: {service_id}")
         service = service_index[service_id]
         prefix = resolve_gateway_prefix(entry, service)
+        gateway_source, gateway_rule_path_fragment, gateway_evidence = gateway_metadata(entry, service)
         updated = dict(entry)
         updated["controller_route"] = entry.get("route")
         updated["route"] = join_routes(prefix, str(entry.get("route", "")))
+        updated["applied_gateway_prefix"] = prefix
+        updated["gateway_source"] = gateway_source
+        updated["gateway_rule_path_fragment"] = gateway_rule_path_fragment
+        updated["gateway_evidence"] = gateway_evidence
+        updated["composed_route"] = updated["route"]
         updated_entries.append(updated)
     return updated_entries
 
@@ -390,6 +400,89 @@ def resolve_gateway_prefix(entry: dict[str, object], service: dict[str, object])
         )
         return str(selected.get("prefix", "")).strip()
     return str(service.get("gateway_prefix", "")).strip()
+
+
+def gateway_metadata(entry: dict[str, object], service: dict[str, object]) -> tuple[str, str, str]:
+    file_path = str(entry.get("file", "")).replace("\\", "/")
+    raw_rules = service.get("gateway_prefix_rules", [])
+    if not isinstance(raw_rules, list):
+        raise TypeError("gateway_prefix_rules must be a list")
+    matching_rules = [
+        rule for rule in raw_rules
+        if isinstance(rule, dict)
+        and str(rule.get("path_fragment", "")).replace("\\", "/").strip("/") in file_path
+    ]
+    if matching_rules:
+        selected = max(matching_rules, key=lambda item: len(str(item.get("path_fragment", ""))))
+        return "rule", str(selected.get("path_fragment", "")), str(selected.get("evidence", ""))
+    return "service", "", str(service.get("gateway_evidence", ""))
+
+
+def analyze_route_consistency(
+    entries: list[dict[str, object]],
+    frontend_calls: list[dict[str, object]],
+) -> dict[str, object]:
+    results: list[dict[str, object]] = []
+    for entry in entries:
+        service_id = str(entry.get("service_id", ""))
+        controller_route = str(entry.get("controller_route", ""))
+        consumers = [
+            call for call in frontend_calls
+            if str(call.get("service_id", "")) == service_id
+            and routes_match(controller_route, str(call.get("route", "")))
+        ]
+        candidates = sorted({
+            prefix_before_suffix(controller_route, str(call.get("route", "")))
+            for call in consumers
+        })
+        if not str(entry.get("gateway_evidence", "")).strip():
+            status = "gateway_evidence_unresolved"
+        elif not consumers:
+            status = "unverified"
+        elif len(candidates) > 1:
+            status = "ambiguous_gateway_route"
+        elif candidates[0] != normalize_path(str(entry.get("applied_gateway_prefix", ""))):
+            status = "gateway_route_conflict"
+        else:
+            status = "matched"
+        results.append({
+            "service_id": service_id,
+            "controller_route": controller_route,
+            "applied_gateway_prefix": entry.get("applied_gateway_prefix", ""),
+            "gateway_source": entry.get("gateway_source", "service"),
+            "gateway_rule_path_fragment": entry.get("gateway_rule_path_fragment", ""),
+            "gateway_evidence": entry.get("gateway_evidence", ""),
+            "composed_route": entry.get("composed_route", ""),
+            "frontend_calls": [
+                {"route": call.get("route"), "file": call.get("file"), "line": call.get("line")}
+                for call in consumers
+            ],
+            "candidate_prefixes": candidates,
+            "status": status,
+            "backend_file": entry.get("file", ""),
+            "backend_line": entry.get("line", ""),
+        })
+    counts = Counter(str(item["status"]) for item in results)
+    return {
+        "routes": results,
+        "route_matched_count": counts["matched"],
+        "route_unverified_count": counts["unverified"],
+        "route_conflict_count": counts["gateway_route_conflict"],
+        "ambiguous_route_count": counts["ambiguous_gateway_route"],
+        "gateway_evidence_unresolved_count": counts["gateway_evidence_unresolved"],
+        "blocking_route_issue_count": counts["gateway_route_conflict"] + counts["ambiguous_gateway_route"] + counts["gateway_evidence_unresolved"],
+    }
+
+
+def normalize_path(value: str) -> str:
+    return join_routes(value, "") if value.strip() else ""
+
+
+def prefix_before_suffix(controller_route: str, consumer_route: str) -> str:
+    controller_segments = route_segments(controller_route)
+    consumer_segments = route_segments(consumer_route)
+    prefix_segments = consumer_segments[:len(consumer_segments) - len(controller_segments)]
+    return join_routes("/" + "/".join(prefix_segments), "") if prefix_segments else ""
 
 
 def parse_parameters(raw_params: str, dto_index: dict[str, dict[str, str]], validation_annotations: set[str], generic_type_pattern: Pattern[str], dto_field_pattern: Pattern[str]) -> list[dict[str, object]]:
@@ -1024,11 +1117,35 @@ def write_summary(path: Path, cases: list[dict[str, object]], entries: list[dict
     write_markdown(path, lines)
 
 
-def update_code_review_report(path: Path, cases: list[dict[str, object]], entries: list[dict[str, object]], tables: list[dict[str, object]], findings: list[dict[str, str]]) -> None:
+def update_code_review_report(path: Path, cases: list[dict[str, object]], entries: list[dict[str, object]], tables: list[dict[str, object]], findings: list[dict[str, str]], route_consistency: dict[str, object]) -> None:
     start_marker = "<!-- testcase-evidence:start -->"
     end_marker = "<!-- testcase-evidence:end -->"
     grades = Counter(str(table["grade"]) for table in tables)
     conflicts = sum(1 for table in tables if table["grade"] == "-")
+    route_rows = route_consistency.get("routes", [])
+    route_lines = [
+        "## 六、前后端路由一致性",
+        "",
+        "| Controller 路由 | 后端源码 | 生效前缀 | 来源 | 模块规则 | 完整路由 | 前端调用 | 候选前缀 | 状态 | 网关证据 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    if isinstance(route_rows, list) and route_rows:
+        for row in route_rows:
+            if not isinstance(row, dict):
+                continue
+            frontend = "; ".join(
+                f"{item.get('route', '')} ({item.get('file', '')}#L{item.get('line', '')})"
+                for item in row.get("frontend_calls", []) if isinstance(item, dict)
+            ) or "无"
+            route_lines.append(
+                f"| {row.get('controller_route', '')} | {row.get('backend_file', '')}#L{row.get('backend_line', '')} | "
+                f"{row.get('applied_gateway_prefix', '')} | {row.get('gateway_source', '')} | "
+                f"{row.get('gateway_rule_path_fragment', '')} | {row.get('composed_route', '')} | {frontend} | "
+                f"{json.dumps(row.get('candidate_prefixes', []), ensure_ascii=False)} | {row.get('status', '')} | "
+                f"{row.get('gateway_evidence', '')} |"
+            )
+    else:
+        route_lines.append("| 无 | 无 | 无 | 无 | 无 | 无 | 无 | [] | unverified | 无 |")
     section = "\n".join([
         start_marker,
         "## 五、用例驱动的接口与数据表识别摘要",
@@ -1038,6 +1155,7 @@ def update_code_review_report(path: Path, cases: list[dict[str, object]], entrie
         f"- 三方一致性：存在 {conflicts} 张多库同名或冲突表。",
         f"- 未闭环用例：{len(findings)} 条。",
         "- 详情：[核心流程接口](core_process_interfaces.md) | [单元测试目标](unit_test_interfaces.md) | [确认数据表](table_information.md) | [未确认数据表](unresolved_tables.md)",
+        *route_lines,
         end_marker,
     ])
     existing = path.read_text(encoding="utf-8") if path.exists() else "# 代码审查报告\n"

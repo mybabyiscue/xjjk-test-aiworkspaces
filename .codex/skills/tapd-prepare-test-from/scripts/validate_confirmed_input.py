@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
+from evidence_transformer import load_generation_sources
 from preparation_contract import PreparationError, file_sha256, load_cases, read_json_object, require_string, write_json_object
 
 
@@ -21,6 +22,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--code-evidence", required=True)
     parser.add_argument("--environment-name", required=True)
     parser.add_argument("--api-domain", required=True)
+    parser.add_argument("--healthcheck-url", required=False)
+    parser.add_argument("--token-error-codes", nargs="*", required=False)
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
@@ -43,6 +46,9 @@ def main() -> int:
     core_interface_evidence_path: Path = existing_path(arguments.core_interface_evidence, "core_interface_evidence")
     table_evidence_path: Path = existing_path(arguments.table_evidence, "table_evidence")
     code_evidence_path: Path = existing_path(arguments.code_evidence, "code_evidence")
+    raw_interface_evidence_path: Path = evidence_index_path.parent / "raw" / "testcase_interface_evidence.json"
+    raw_call_chain_evidence_path: Path = evidence_index_path.parent / "raw" / "call_chain_evidence.json"
+    raw_table_evidence_path: Path = evidence_index_path.parent / "raw" / "table_evidence.json"
     input_paths: dict[str, Path] = {
         "test_cases": test_cases_path,
         "tapd_cases": cases_path,
@@ -51,6 +57,9 @@ def main() -> int:
         "core_interface_evidence": core_interface_evidence_path,
         "table_evidence": table_evidence_path,
         "code_evidence": code_evidence_path,
+        "raw_interface_evidence": raw_interface_evidence_path,
+        "raw_call_chain_evidence": raw_call_chain_evidence_path,
+        "raw_table_evidence": raw_table_evidence_path,
     }
     confirmation: dict[str, object] = read_json_object(confirmation_path)
     evidence_index: dict[str, object] = read_json_object(evidence_index_path)
@@ -70,7 +79,16 @@ def main() -> int:
             "core_process_interfaces.md": core_interface_evidence_path,
             "table_information.md": table_evidence_path,
             "source_manifest.json": code_evidence_path,
+            "raw/testcase_interface_evidence.json": raw_interface_evidence_path,
+            "raw/call_chain_evidence.json": raw_call_chain_evidence_path,
+            "raw/table_evidence.json": raw_table_evidence_path,
         },
+    )
+    generation_sources: dict[str, object] = load_generation_sources(
+        evidence_index_path,
+        unit_interface_evidence_path,
+        core_interface_evidence_path,
+        table_evidence_path,
     )
     snapshot: dict[str, object] = {
         "testcase_confirmation": {
@@ -79,7 +97,22 @@ def main() -> int:
             "approved_at": confirmation.get("approved_at", ""),
         },
         "input_hashes": {name: file_sha256(path) for name, path in input_paths.items()},
-        "environment": {"name": require_string(arguments.environment_name, "environment_name"), "api_domain": require_string(arguments.api_domain, "api_domain")},
+        "evidence_files": {
+            "unit_test_interfaces.md": str(unit_interface_evidence_path),
+            "core_process_interfaces.md": str(core_interface_evidence_path),
+            "table_information.md": str(table_evidence_path),
+            "source_manifest.json": str(code_evidence_path),
+            "raw/testcase_interface_evidence.json": str(raw_interface_evidence_path),
+            "raw/call_chain_evidence.json": str(raw_call_chain_evidence_path),
+            "raw/table_evidence.json": str(raw_table_evidence_path),
+        },
+        "generation_sources": generation_sources.get("source_artifacts", {}),
+        "environment": {
+            "name": require_string(arguments.environment_name, "environment_name"),
+            "api_domain": require_string(arguments.api_domain, "api_domain"),
+            "healthcheck_url": arguments.healthcheck_url or "",
+            "token_error_codes": list(arguments.token_error_codes or []),
+        },
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     write_json_object(Path(arguments.output), snapshot)

@@ -19,6 +19,10 @@
 
 前端 URL 常量和请求函数只能作为消费者证据，不能单独认定为服务端入口。
 
+网关证据必须解析为单一、可复核的规范化路径前缀。证据文件、证据行、原始证据行及其 SHA-256 必须写入 `review_context.json`，并在证据生成、发布和最终审批前重新校验。前端消费者只能用于路由一致性校验，不能替代网关配置证据。
+
+路由一致性结果写入 `raw/route_consistency.json`，状态为 `matched`、`gateway_route_conflict`、`ambiguous_gateway_route`、`gateway_evidence_unresolved` 或 `unverified`。
+
 ## 接口结构
 
 - 合并类级和方法级路由。

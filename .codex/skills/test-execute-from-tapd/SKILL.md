@@ -22,8 +22,9 @@ description: 执行由 tapd-prepare-test-from 生成并审核通过的真实数�
    - 需要数据库断言或受控 SQL 时的 `config/connections.json`
 2. 校验 `output/latest/testcase_confirmation.json` 的 `approved` 严格等于 `true`。
 3. 读取 `config/environments_config.json`，向用户展示全部平台的 `name` 和 `api_domain`。即使只有一个平台，也必须等待用户明确选择；不得默认选择。计划包含数据变更时还必须确认 `environment_type=test` 且 `allow_test_data_mutation=true`。
-4. 确认准备评估包不存在 `unresolved` 参数，所有接口审核状态允许执行，所有响应和数据库断言均可机器判定。
-5. 校验结构化执行计划中的测试用例哈希与审批文件一致。
+4. 直接询问用户“本次执行中响应体 `code` 的正确值是什么”并等待明确回答。不得从历史报告、环境配置、HTTP Status、`success` 字段或上一次对话推测，不得设置默认值。未获得用户确认时必须 Halt。
+5. 确认准备评估包不存在 `unresolved` 参数，所有接口审核状态允许执行，所有响应和数据库断言均可机器判定。
+6. 校验结构化执行计划中的测试用例哈希与审批文件一致。
 
 Token 失效或租户/平台选择有歧义时立即 Halt：
 
@@ -60,6 +61,7 @@ python .codex/skills/test-execute-from-tapd/scripts/run_test_execution.py `
   --confirmation output/latest/testcase_confirmation.json `
   --environment-config config/environments_config.json `
   --environment-name "<用户确认的平台名称>" `
+  --expected-business-code "<用户本次明确确认的 code 值>" `
   --connections config/connections.json `
   --read-connection-name "<存在数据库断言时用户确认的只读连接>" `
   --write-connection-name "<存在受控 SQL 时用户另行确认的写连接>" `
@@ -71,6 +73,7 @@ python .codex/skills/test-execute-from-tapd/scripts/run_test_execution.py `
 
 - 对网络错误、HTTP 429 和 5xx 最多执行三次请求，每次重试输出结构化 Warning，最终失败保留状态码和 Response Body。
 - 将 401、403 或已声明的 Token 失效业务码识别为退出码 `10`，不得吞错或改写成 500。
+- 对每个 HTTP 响应强制读取顶层 `code` 字段，并与用户本次确认的值比较。字段缺失或值不相等时必须判定 `FAIL`，即使 HTTP Status 为 200 也不得通过。不使用 `success` 字段代替该断言。
 - 单接口用例互相独立执行；核心流程任一步失败后立即中止该流程，并将后续步骤标记为未执行。
 - 只执行计划登记的 SQL，不改写 SQL，不扫描其他表。数据库断言只用 `read-only` 连接执行 `SELECT`；写连接只执行显式列参数化 `INSERT` 和单一 `TEST_` 标识的精确/前缀 `DELETE`。
 - 按计划先执行真实 setup；部分准备失败时反向清理已尝试项。无论接口通过、失败、异常或 Token 失效，都在 `finally` 中执行 cleanup。
@@ -86,7 +89,7 @@ python .codex/skills/test-execute-from-tapd/scripts/run_test_execution.py `
 - `output/core_flow_test_execution_report.md`
 - 更新后的 `output/test_data_manifest.md`
 
-报告必须区分 `PASS`、`FAIL`、`EXECUTION_ERROR`、`NOT_EXECUTED`，并记录实际状态码、脱敏请求、Response Body、断言结果、数据库查询来源和流程中断位置。通过率只统计实际执行且产生断言结果的用例。
+报告必须区分 `PASS`、`FAIL`、`EXECUTION_ERROR`、`NOT_EXECUTED`，并记录实际状态码、脱敏请求、Response Body、用户确认的期望 `code`、实际 `code`、断言结果、数据库查询来源和流程中断位置。通过率只统计实际执行且产生断言结果的用例。
 
 ## 禁止行为
 

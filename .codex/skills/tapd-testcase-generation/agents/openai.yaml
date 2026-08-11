@@ -1,4 +1,4 @@
 interface:
   display_name: "TAPD 测试用例生成"
-  short_description: "基于已审计 TAPD 需求生成并校验 Markdown、JSON 与 Excel 测试用例"
-  default_prompt: "使用 $tapd-testcase-generation 基于 output/requirement.md 生成并校验 Markdown、JSON 与 Excel TAPD 测试用例产物。"
+  short_description: "基于原子测试点矩阵生成并审计 Markdown、JSON、Excel 用例"
+  default_prompt: "使用 $tapd-testcase-generation 基于 output/requirement.md 生成并校验 TAPD 测试用例及审计产物。"

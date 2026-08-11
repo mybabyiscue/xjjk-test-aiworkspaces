@@ -1,0 +1,12 @@
+{
+  "query_plan": {
+    "required_object_fields": ["connection", "queries", "generation_report"],
+    "required_query_fields": ["query_reference", "database", "table", "purpose", "max_rows", "sql", "source_evidence", "condition_status"],
+    "required_generation_report_fields": ["status", "missing_items", "source_artifacts"]
+  },
+  "model_mapping": {
+    "required_object_fields": ["data_preparation", "interface_cases", "non_interface_cases", "core_flows", "core_flow_blocker_reason", "generation_report"],
+    "required_data_preparation_fields": ["entries"],
+    "required_generation_report_fields": ["status", "missing_items", "source_artifacts"]
+  }
+}

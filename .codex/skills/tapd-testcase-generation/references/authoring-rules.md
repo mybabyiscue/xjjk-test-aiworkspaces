@@ -167,3 +167,16 @@ Excel 与 JSON 的用例数量、编号、顺序和全部字段必须一致。�
 ## 6. 移交
 
 产物通过校验后移交 `tapd-code-source-review`。本技能不得生成或修改 `output/latest/testcase_confirmation.json`，不得更新知识库经验条目，不得同步 TAPD。
+
+
+## 7. Coverage report
+
+Generate output/testcase_coverage.md with function-point coverage, BDD coverage, uncovered items, and atomicity checks. Report completion only after the audit passes.
+
+
+## 8. Stable coverage references
+
+Use stable identifiers from `output/coverage_manifest.json` in `requirement_points`. Do not encode business keywords or rely on display names as coverage keys.
+# Atomic test-point contract
+
+Every testcase is one executable Given-When-Then loop and references exactly one `TP-xxx` test point. Build `output/testpoint_matrix.json` before final artifacts. Keep one stable `atomic_rule_id` per independently verifiable rule, preserve exact prompts/tab order/dynamic text from `requirement.md`, and transfer unresolved rules to `questions.md` instead of inventing assertions. Reject vague expected results and duplicate/equivalent cases during audit.

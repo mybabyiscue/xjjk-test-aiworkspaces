@@ -40,6 +40,9 @@ def main() -> int:
     )
     if validation.get("valid") is not True or validation.get("approval_ready") is not True:
         raise ValueError("Review validation is not approval-ready")
+    for key in ("route_conflict_count", "ambiguous_route_count", "gateway_evidence_unresolved_count"):
+        if validation.get(key) != 0:
+            raise ValueError(f"Review validation contains blocking route issues: {key}={validation.get(key)}")
     if confirmation.get("approved") is not True:
         raise ValueError("Code source confirmation is not approved")
     if validation.get("review_run_id") != run_dir.name:

@@ -55,3 +55,9 @@
 - 每个测试点只属于一个主要场景维度和一个主要测试目的。
 - 所有疑问范围均已隔离，未进入断言用例。
 - 覆盖率按已确认功能点计算，不把待确认功能点计为已覆盖。
+
+
+## 6. Coverage audit
+
+After the BLAST matrix, verify direct coverage for every core function point and BDD scenario. Verify explicit rejection, empty, repeat, first/subsequent, and combination rules have atomic cases. Coverage is not testcase count.
+
