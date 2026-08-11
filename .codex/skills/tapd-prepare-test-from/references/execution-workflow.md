@@ -17,6 +17,23 @@
 
 ## Stage 4 必出物
 
+## 2. Token Gate
+
+用户确认单个 API 环境后执行。脚本只按环境具备的 `token_probe` 或登录字段选择能力，不按名称、域名或业务码分支：
+
+```powershell
+$skillPath = Resolve-Path '.codex/skills/tapd-prepare-test-from'
+python "$skillPath/scripts/validate_environment_token.py" `
+  --config 'config/environments_config.json' `
+  --environment-name '<用户确认的环境名>' `
+  --request-timeout-seconds 10 `
+  --retry-count 3 `
+  --browser-timeout-ms 30000
+```
+
+此命令失败时停止。不得把 `api_domain` 根地址当作探测端点，不得猜测响应业务码、登录定位信息或 Token 格式。脚本成功续期时只原子更新所选环境的 `authorization`。
+
+## 3. 确认输入快照
 - `output/test_preparation/query_plan.json`：由 `scripts/generate_query_plan.py` 生成。
 - `output/test_preparation/model_mapping.json`：由 `scripts/generate_model_mapping.py` 生成。
 - `output/test_preparation/preparation_assessment.json`
