@@ -31,6 +31,40 @@ description: 基于已审批 TAPD 测试用例、代码审查证据、用户确�
 
 ## 必出物
 
+- 优先使用用户确认的只读连接执行单条 `SELECT` 并复用现有真实记录；查不到时不得直接标记 `blocked`，应依次评估真实业务 API、受控 SQL 和人工创建。
+- 正向用例只允许真实查询或真实创建的数据；禁止 Mock、Fake、Stub、Mock seed、占位主键和凭空构造字段。
+- 仅为有明确需求或代码校验证据的反向用例构造无效值、边界值或越权 ID。
+- 自动创建优先使用有源码证据的真实业务 API。无稳定 API 且不绕过被测行为时，允许用户单独确认的 `controlled-write` 测试连接执行显式列、参数化单条 `INSERT`；清理只允许按 `TEST_` 标识精确或前缀匹配的参数化单条 `DELETE`。
+- 禁止 `UPDATE`、DDL、存储过程、`TRUNCATE`、无界 `DELETE`、文件导出、锁操作、注释 SQL 和生产环境写入。
+- 每个自动创建动作必须有一一对应的清理动作；测试失败、Token 失效或部分准备失败时也必须反向清理。清理失败必须登记残留数据并返回失败。
+- 将 API Token、账号和密码仅保存到已被 Git 忽略的 `config/environments_config.json`；数据库连接凭证仅保存到已被 Git 忽略的 `config/connections.json`。禁止写入技能目录、Markdown、JSON 中间产物、日志或 Git 跟踪文件。
+- 文档中的敏感 Header 必须显示为 `***`。
+- 将每条真实查询结果按 `库名:表名:【JSON】` 写入 `output/test_data_manifest.md`。
+
+## 证据规则
+
+- HTTP Method 只能来自控制器注解证据。
+- 请求路径必须使用代码审查产物中的完整网关路径。
+- DTO 字段、表名、列名和数据库断言只能来自代码审查与物理元数据。
+- 每条用例必须恰好归入一个接口组或不可接口测试组。
+- 缺少证据时将用例标记为 `blocked` 并说明缺失项；不得补写推测结论。
+- 只有存在真实代码依赖证据时才生成核心集成流程，否则写明 `core_flow_blocker_reason`。
+
+## 执行
+
+严格执行 [execution-workflow.md](references/execution-workflow.md) 中的命令，不直接手写最终文档：
+
+1. 校验确认文件并生成不可变输入快照。
+2. 初始化评估壳。
+3. 从已确认的表证据生成只读查询计划并执行真实查询。
+4. 按“复用 -> 真实 API -> 受控 SQL -> 人工创建后复查”的顺序生成 `data_preparation` 和 `model_mapping.json`。新增功能只准备真实上游依赖，不预创建被测目标对象；更新、删除和状态流转用例可先创建真实目标对象。
+5. 合并并校验 `preparation_assessment.json`。
+6. 仅在校验报告 `valid` 为 `true` 时渲染最终文档。
+7. 需要交给第五步执行时，生成唯一的 `output/test_execution/execution_plan.json`，写入 assessment SHA-256、用例哈希、代码复审批次以及结构化 setup/cleanup；第五步直接消费并按当前 assessment 规范重建比较，不得重新生成或修补计划。存在阻断项时不得执行接口。
+
+## 最终产物
+
+只在全部 Gate 和评估校验通过后生成：
 Stage 4 必须由 skill 自己生成以下准备产物：
 
 - `output/test_preparation/query_plan.json`：由 `scripts/generate_query_plan.py` 根据 `evidence_index.json`、接口证据、核心流程证据和表证据生成。
