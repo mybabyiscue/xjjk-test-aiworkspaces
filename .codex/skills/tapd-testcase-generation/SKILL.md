@@ -133,3 +133,25 @@ python .codex/skills/tapd-testcase-generation/scripts/validate_outputs.py output
 - Markdown、JSON 与 Excel 的用例编号、数量、标题顺序、优先级和核心字段一致。
 - 已展示覆盖摘要并明确移交 `tapd-code-source-review`。
 - 未执行数据库查询、源码推断、TAPD 同步、最终审批或知识沉淀。
+
+
+## Post-generation coverage gate
+
+Before authoring cases, build a coverage matrix from core function points, main/exception/edge flows, and BDD scenarios. Each explicit function point must be checked for success, explicit rejection/empty/error, and explicit boundary/repeat/combination/state rules. Do not invent undefined assertions; move them to questions.md.
+
+After generating artifacts, run:
+
+```powershell
+python .codex/skills/tapd-testcase-generation/scripts/audit_testcase_coverage.py output
+```
+
+审计门禁以 `output/testpoint_matrix.json` 为正式中间产物。矩阵中每一行必须包含 `test_point_id`、`function_point_id`、`atomic_rule_id`、`bdd_scenario_id`、`rule_text`、`source_section`、`source_evidence`、`active_layer`、`scenario_dimension`、`given`、`when`、`then`、`priority`、`disposition`、`question_id`、`case_id`；P0 测试点还要提供通用 `risk_tags`（如 `data_consistency`、`data_isolation`、`authorization`、`financial`、`state_integrity`）。每条原子规则必须落到一个测试点；每个测试点只能对应一个用例，或以 `disposition=question` 转入 `questions.md`。
+
+审计会拒绝重复标题、等价 Given-When-Then、错误需求映射、缺少原文证据、未定义的模糊预期（如“操作成功”“显示正常”“可能出现”）以及只覆盖复合功能点一部分规则的用例。中文需求默认生成中文用例；P0 数据一致性场景须在备注写明风险原因。
+
+核心交付物是 `test_cases.md`、`questions.md`、`tapd_cases.json`、`test_cases.xlsx`；`testpoint_matrix.json`、`testcase_coverage.md`、`coverage_manifest.json`、`agent2_prompt.md` 属于审计和追溯产物，不能替代核心用例。生成顺序固定为：先生成矩阵，再生成 Markdown/JSON，再由 JSON 全量导出 Excel，最后依次运行覆盖审计和确定性校验。
+
+
+## Stable coverage identifiers
+
+The coverage audit derives `output/coverage_manifest.json` from the requirement document and assigns stable `FP-xxx` identifiers to core function points and `BDD-xxx` identifiers to BDD scenarios. Testcase requirement references must use these identifiers. The audit must not match business keywords or fixed scenario names.

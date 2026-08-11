@@ -37,6 +37,13 @@
 
 如果服务获取失败或缓存路径不可读，不允许静默跳过，必须记入 `input_check.md` 和后续索引文件。
 
+## 网关证据与路由一致性 Gate
+
+- 网关证据行必须解析出唯一完整 `Path`、`url`、`uri` 或 `route` 路径；只移除末尾 `/*` 或 `/**` 后，必须与输入前缀规范化精确相等。
+- 普通字符串包含关系不能证明网关前缀。无法解析、解析出多个候选或不一致时，状态为 `gateway_evidence_unresolved` 并阻断。
+- 服务端 Controller 路由必须与扫描到的前端消费者按规范化路径段匹配。前端候选前缀与当前生效前缀不一致时为 `gateway_route_conflict`，多个不同候选时为 `ambiguous_gateway_route`，无消费者时为 `unverified`。
+- `gateway_route_conflict`、`ambiguous_gateway_route`、`gateway_evidence_unresolved` 不得发布或最终审批。
+
 ## 门禁失败输出
 
 门禁失败时必须输出 `input_check.md`，至少包含：

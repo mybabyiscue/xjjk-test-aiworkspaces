@@ -29,6 +29,10 @@
     "route_literal_pattern": "(?<![\\w])/(?:[A-Za-z0-9_{}.-]+/)*[A-Za-z0-9_{}.-]+"
   },
   "interface_detection": {
+    "gateway_evidence_patterns": [
+      "(?i)\\bpath\\s*[:=]\\s*[\\\"'`]?\\s*(?P<path>/[^\\\"'`,;\\s]+)",
+      "(?i)\\b(?:url|uri|route)\\s*[:=]\\s*[\\\"'`]\\s*(?P<path>/[^\\\"'`]+)"
+    ],
     "frontend_route_pattern": "(?P<symbol>[A-Za-z_$][\\w$]*)?\\s*[:=]\\s*['\\\"](?P<route>/[^'\\\"]+)['\\\"]",
     "http_mapping_annotations": ["GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping", "RequestMapping"],
     "http_annotation_methods": {"GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT", "DeleteMapping": "DELETE", "PatchMapping": "PATCH", "RequestMapping": "FROM_ARGUMENTS"},

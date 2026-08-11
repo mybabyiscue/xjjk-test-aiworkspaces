@@ -146,6 +146,21 @@ public class ActivityController {
     assert json.loads((latest / "review_context.json").read_text(encoding="utf-8"))["review_run_id"] == review_run.name
     assert "/product/mp/activity/save" in (latest / "core_process_interfaces.md").read_text(encoding="utf-8")
 
+    route_path = review_run / "raw" / "route_consistency.json"
+    route_payload = json.loads(route_path.read_text(encoding="utf-8"))
+    route_payload["route_conflict_count"] = 1
+    route_payload["blocking_route_issue_count"] = 1
+    write_json(route_path, route_payload)
+    with pytest.raises(subprocess.CalledProcessError):
+        run_script(
+            "validate_publish_review.py",
+            "--run-dir", str(review_run),
+            "--test-cases", str(test_cases),
+            "--output-root", str(review_root),
+        )
+    assert json.loads((latest / "review_context.json").read_text(encoding="utf-8"))["review_run_id"] == review_run.name
+    assert json.loads((review_run / "review_validation.json").read_text(encoding="utf-8"))["valid"] is False
+
 
 def run_script(script_name: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(

@@ -1,4 +1,4 @@
 interface:
   display_name: "TAPD 接口测试准备"
-  short_description: "基于已审批用例、代码证据和真实数据生成可执行测试准备产物"
-  default_prompt: "Use $tapd-prepare-test-from to prepare evidence-backed interface test data and documents after enforcing all approval gates."
+  short_description: "基于已审批用例、结构化证据、环境配置和真实数据生成测试准备产物"
+  default_prompt: "Use $tapd-prepare-test-from to prepare evidence-backed HTTP API test data, documents, and execution plans after enforcing approval, environment, token, database, evidence, and release gates."

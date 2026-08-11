@@ -1,0 +1,25 @@
+{
+  "vague_assertions": [
+    "操作成功",
+    "显示正常",
+    "数据正确",
+    "显示对应内容",
+    "显示指定文案",
+    "各自的文案",
+    "可能出现",
+    "应该正常",
+    "相关信息",
+    "保持一致"
+  ],
+  "scenario_cues": {
+    "Alternative/Error": ["拒绝", "失败", "冲突", "无匹配", "不可", "不展示"],
+    "Edge Cases": ["重复", "首次", "后续", "每次", "多个", "隔离", "保持"]
+  },
+  "risk_tags": [
+    "data_consistency",
+    "data_isolation",
+    "authorization",
+    "financial",
+    "state_integrity"
+  ]
+}

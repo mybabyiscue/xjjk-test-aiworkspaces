@@ -16,6 +16,7 @@ REQUIRED_REVIEW_ARTIFACTS: Final[tuple[str, ...]] = (
     "raw/prepare_findings.json",
     "raw/parsed_test_cases.json",
     "raw/code_entry_index.json",
+    "raw/route_consistency.json",
     "raw/testcase_interface_evidence.json",
     "raw/call_chain_evidence.json",
     "raw/table_evidence.json",
@@ -210,6 +211,7 @@ def validate_prepared_review_gate(
     if questions.get("sha256") != expected["questions_sha256"]:
         raise ValueError("Questions evidence changed after preparation")
     successful_sources(manifest)
+    validate_gateway_evidence_integrity(context, manifest)
     return context
 
 
@@ -221,6 +223,32 @@ def review_input_path(context: dict[str, object], key: str) -> Path:
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ValueError(f"Review context is missing input path: {key}")
     return Path(raw_path).resolve()
+
+
+def validate_gateway_evidence_integrity(context: dict[str, object], manifest: dict[str, object]) -> None:
+    records: list[dict[str, object]] = []
+    for key in ("gateway_evidence", "gateway_evidence_rules"):
+        raw_records = context.get(key)
+        if not isinstance(raw_records, dict):
+            raise ValueError(f"review_context.json.{key} must be an object")
+        records.extend(value for value in raw_records.values() if isinstance(value, dict))
+    for record in records:
+        evidence_file = Path(str(record.get("evidence_file", ""))).resolve()
+        line_number = record.get("evidence_line")
+        if not evidence_file.is_file() or not isinstance(line_number, int) or line_number < 1:
+            raise ValueError("gateway_evidence_unresolved: evidence file or line is invalid")
+        lines = evidence_file.read_text(encoding="utf-8").splitlines()
+        if line_number > len(lines):
+            raise ValueError("gateway_evidence_unresolved: evidence line is outside the file")
+        raw_line = lines[line_number - 1]
+        if sha256_file(evidence_file) != record.get("evidence_file_sha256"):
+            raise ValueError(f"Gateway evidence file changed: {evidence_file}")
+        if raw_line != record.get("raw_line") or sha256_text(raw_line) != record.get("raw_line_sha256"):
+            raise ValueError(f"Gateway evidence line changed: {evidence_file}#L{line_number}")
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def artifact_hashes(run_dir: Path) -> dict[str, str]:

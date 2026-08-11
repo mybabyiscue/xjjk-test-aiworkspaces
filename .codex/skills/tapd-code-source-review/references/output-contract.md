@@ -33,6 +33,7 @@ output/
 │   │       │   ├── parsed_test_cases.json    # 解析出的测试用例数据
 │   │       │   ├── prepare_findings.json      # 代码源初审结构化发现
 │   │       │   ├── code_entry_index.json     # 服务端入口索引
+│   │       │   ├── route_consistency.json   # 前后端网关路由一致性
 │   │       │   ├── testcase_interface_evidence.json # 用例接口证据
 │   │       │   ├── call_chain_evidence.json  # 调用链证据
 │   │       │   ├── table_evidence.json       # 匹配库表数据

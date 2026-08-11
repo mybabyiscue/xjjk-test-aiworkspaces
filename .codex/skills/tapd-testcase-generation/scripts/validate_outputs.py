@@ -7,7 +7,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Sequence, TypeAlias
+from typing import Sequence, TypedDict, TypeAlias
 from zipfile import BadZipFile
 
 from openpyxl import load_workbook
@@ -17,10 +17,18 @@ from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from export_test_cases_excel import HEADERS, SHEET_NAME, ExcelRow, build_excel_rows
+from audit_testcase_coverage import audit
 
 
 JsonObject: TypeAlias = dict[str, object]
 MarkdownCase: TypeAlias = dict[str, object]
+
+
+class StoryIdentity(TypedDict):
+    workspace_id: str
+    id: str
+    short_id: str
+    name: str
 
 CASE_HEADING_PATTERN: re.Pattern[str] = re.compile(
     r"^###\s+(TC\d{3})\s+-\s+(.+)$",
@@ -79,6 +87,22 @@ PLACEHOLDERS: tuple[str, ...] = (
     "[业务目录]",
     "[功能模块]",
     "[TAPD short_id]",
+)
+WORKSPACE_ID_PATTERN: re.Pattern[str] = re.compile(
+    r"^- workspace_id\s*[：:]\s*(\S+)\s*$",
+    re.MULTILINE,
+)
+FULL_STORY_ID_PATTERN: re.Pattern[str] = re.compile(
+    r"^- TAPD 需求完整 ID\s*[：:]\s*(\S+)\s*$",
+    re.MULTILINE,
+)
+SHORT_STORY_ID_PATTERN: re.Pattern[str] = re.compile(
+    r"^- TAPD 需求短号\s*[：:]\s*(\S+)\s*$",
+    re.MULTILINE,
+)
+STORY_NAME_PATTERN: re.Pattern[str] = re.compile(
+    r"^\|\s*原始需求标题\s*\|\s*(.*?)\s*\|\s*$",
+    re.MULTILINE,
 )
 
 
@@ -143,6 +167,66 @@ def require_string_list(value: object, field_name: str) -> list[str]:
         require_string(item, f"{field_name}[{index}]")
         for index, item in enumerate(raw_items)
     ]
+
+
+def extract_single_value(
+    requirement: str,
+    pattern: re.Pattern[str],
+    field_name: str,
+) -> str:
+    matches: list[re.Match[str]] = list(pattern.finditer(requirement))
+    if len(matches) != 1:
+        raise ValueError(
+            f"requirement.md 中 {field_name} 必须且只能出现一次，实际 {len(matches)} 次。"
+        )
+    return require_string(matches[0].group(1), f"requirement.md.{field_name}")
+
+
+def extract_numeric_identifier(
+    requirement: str,
+    pattern: re.Pattern[str],
+    field_name: str,
+) -> str:
+    value: str = extract_single_value(requirement, pattern, field_name)
+    if not value.isdecimal():
+        raise ValueError(f"requirement.md.{field_name} 必须是纯数字标识，实际={value!r}。")
+    return value
+
+
+def extract_story_identity(requirement: str) -> StoryIdentity:
+    return {
+        "workspace_id": extract_numeric_identifier(
+            requirement,
+            WORKSPACE_ID_PATTERN,
+            "workspace_id",
+        ),
+        "id": extract_numeric_identifier(
+            requirement,
+            FULL_STORY_ID_PATTERN,
+            "TAPD 需求完整 ID",
+        ),
+        "short_id": extract_numeric_identifier(
+            requirement,
+            SHORT_STORY_ID_PATTERN,
+            "TAPD 需求短号",
+        ),
+        "name": extract_single_value(
+            requirement,
+            STORY_NAME_PATTERN,
+            "原始需求标题",
+        ),
+    }
+
+
+def validate_story_identity(story: JsonObject, expected: StoryIdentity) -> None:
+    for field_name in ("workspace_id", "id", "short_id", "name"):
+        actual_value: str = require_string(story.get(field_name), f"story.{field_name}")
+        expected_value: str = expected[field_name]
+        if actual_value != expected_value:
+            raise ValueError(
+                f"story.{field_name} 与 requirement.md 不一致；"
+                f"期望={expected_value!r}，实际={actual_value!r}。"
+            )
 
 
 def section_priority(markdown: str, position: int) -> str:
@@ -237,6 +321,7 @@ def validate_json_case(
     raw_case: object,
     markdown_case: MarkdownCase,
     index: int,
+    expected_requirement_id: str,
 ) -> None:
     field_prefix: str = f"cases[{index}]"
     case: JsonObject = require_object(raw_case, field_prefix)
@@ -273,6 +358,15 @@ def validate_json_case(
         raise ValueError(f"{case_id}.case_status 不合法: {case_status}")
     if priority not in PRIORITIES:
         raise ValueError(f"{case_id}.priority 不合法: {priority}")
+    requirement_id: str = require_string(
+        case.get("requirement_id"),
+        f"{field_prefix}.requirement_id",
+    )
+    if requirement_id != expected_requirement_id:
+        raise ValueError(
+            f"{case_id}.requirement_id 与 story.short_id 不一致；"
+            f"期望={expected_requirement_id!r}，实际={requirement_id!r}。"
+        )
 
     for field_name in ("steps", "expected_results"):
         json_values: list[str] = require_string_list(
@@ -294,16 +388,22 @@ def validate_json_case(
         "requirement_points",
         case_id,
     )
-    if markdown_requirement_point not in requirement_points:
-        raise ValueError(f"{case_id}.requirement_points 未包含 Markdown 关联需求点。")
+    if requirement_points != [markdown_requirement_point]:
+        raise ValueError(
+            f"{case_id}.requirement_points 在 Markdown 与 JSON 中不一致；"
+            f"Markdown={[markdown_requirement_point]!r}，JSON={requirement_points!r}。"
+        )
 
 
-def validate_json_payload(payload: JsonObject, markdown_cases: list[MarkdownCase]) -> None:
+def validate_json_payload(
+    payload: JsonObject,
+    markdown_cases: list[MarkdownCase],
+    story_identity: StoryIdentity,
+) -> None:
     require_exact_keys(payload, ROOT_KEYS, "tapd_cases.json")
     story: JsonObject = require_object(payload.get("story"), "story")
     require_exact_keys(story, STORY_KEYS, "story")
-    for field_name in sorted(STORY_KEYS):
-        require_string(story.get(field_name), f"story.{field_name}")
+    validate_story_identity(story, story_identity)
 
     raw_total_count: object = payload.get("total_count")
     if isinstance(raw_total_count, bool) or not isinstance(raw_total_count, int):
@@ -317,7 +417,12 @@ def validate_json_payload(payload: JsonObject, markdown_cases: list[MarkdownCase
         raise ValueError("cases 不能为空。")
 
     for index, raw_case in enumerate(raw_cases):
-        validate_json_case(raw_case, markdown_cases[index], index)
+        validate_json_case(
+            raw_case,
+            markdown_cases[index],
+            index,
+            story_identity["short_id"],
+        )
 
 
 def validate_questions(markdown: str) -> None:
@@ -325,6 +430,30 @@ def validate_questions(markdown: str) -> None:
         raise ValueError("questions.md 缺少固定标题 `# 待确认问题清单`。")
     if REQUIRED_QUESTION_HEADER not in markdown:
         raise ValueError("questions.md 表头不符合唯一契约。")
+    rows: list[list[str]] = []
+    for line in markdown.splitlines():
+        if not line.startswith("|") or line.startswith("|---") or line == REQUIRED_QUESTION_HEADER:
+            continue
+        cells: list[str] = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) == 6:
+            rows.append(cells)
+    if not rows:
+        raise ValueError("questions.md 必须包含问题行或‘无待确认问题’行。")
+    no_question_rows: list[list[str]] = [row for row in rows if row[2] == "无待确认问题"]
+    if no_question_rows:
+        if len(rows) != 1 or no_question_rows[0][0] != "无":
+            raise ValueError("‘无待确认问题’行不能与实际问题混用。")
+        return
+    ids: list[str] = [row[0] for row in rows]
+    expected_ids: list[str] = [f"Q{index:03d}" for index in range(1, len(rows) + 1)]
+    if ids != expected_ids:
+        raise ValueError(f"questions.md 问题编号必须连续且唯一，期望={expected_ids}，实际={ids}。")
+    allowed_types: set[str] = {"业务规则", "异常规则", "边界规则", "提示文案", "数据规则", "交互规则", "依赖范围", "技术实现"}
+    for row in rows:
+        if row[2] not in allowed_types:
+            raise ValueError(f"{row[0]} 问题类型不合法: {row[2]}")
+        if not row[1] or not row[3] or not row[4]:
+            raise ValueError(f"{row[0]} 关联点、问题描述和来源不能为空。")
 
 
 def require_excel_row(raw_row: tuple[object, ...], row_number: int) -> ExcelRow:
@@ -420,16 +549,22 @@ def validate_output_directory(output_directory: Path) -> None:
     questions_path: Path = output_directory / "questions.md"
     tapd_cases_path: Path = output_directory / "tapd_cases.json"
     test_cases_excel_path: Path = output_directory / "test_cases.xlsx"
+    requirement_path: Path = output_directory / "requirement.md"
 
+    requirement_text: str = read_text(requirement_path)
     test_cases_markdown: str = read_text(test_cases_path)
     questions_markdown: str = read_text(questions_path)
     payload: JsonObject = read_json_object(tapd_cases_path)
-
+    story_identity: StoryIdentity = extract_story_identity(requirement_text)
     markdown_cases: list[MarkdownCase] = parse_markdown_cases(test_cases_markdown)
     validate_case_sequence(markdown_cases)
     validate_questions(questions_markdown)
-    validate_json_payload(payload, markdown_cases)
+    validate_json_payload(payload, markdown_cases, story_identity)
     validate_excel_workbook(test_cases_excel_path, payload)
+    coverage_report, coverage_failures = audit(output_directory)
+    (output_directory / "testcase_coverage.md").write_text(coverage_report, encoding="utf-8")
+    if coverage_failures:
+        raise ValueError("coverage audit failed: " + "; ".join(coverage_failures))
 
 
 def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
