@@ -148,7 +148,7 @@ flowchart LR
 | 代码复审 Gate | 第四、五步 | `code_review_run_id` 与当前审批文件一致 |
 | API 环境 Gate | 第四、五步 | 用户从环境列表中明确选择一个环境 |
 | 数据库平台 Gate | 第三、四、五步 | 用户明确选择只读连接；需要 SQL 写入时另行确认受控写连接 |
-| Token Gate | 第四、五步 | Token 有效、租户无歧义；失效且无法重新登录时暂停 |
+| Token Gate | 第四、五步 | 按 `token_probe` 验证 Token，或在环境具备完整登录能力时自动续期；无法安全验证或续期时暂停 |
 | 数据变更 Gate | 第五步 | `environment_type=test` 且 `allow_test_data_mutation=true` |
 
 即使列表中只有一个环境或数据库连接，也不得自动替用户选择。
@@ -186,7 +186,7 @@ python -m venv .venv
 
 ### 2. 配置本地凭证
 
-在 `config/credentials.local.json` 中维护 TAPD、测试环境账号和 Token。该文件已加入 `.gitignore`。
+在 `config/credentials.local.json` 中维护 TAPD 和其他非 API 环境外部系统凭证。API 环境的账号、密码和 Token 直接维护在 `config/environments_config.json`。两个文件均已加入 `.gitignore`。
 
 凭证只允许保存在本地配置中，不得写入：
 
@@ -197,7 +197,7 @@ python -m venv .venv
 
 ### 3. 配置 API 环境
 
-`config/environments_config.json` 只保存非敏感环境元数据。需要执行数据 setup 时，环境必须明确声明为测试环境：
+`config/environments_config.json` 是 API 环境元数据、账号、密码和 Token 的唯一来源。`authorization` 按配置原值使用，不会自动添加或删除 `Bearer`。需要执行数据 setup 时，环境还必须明确声明为测试环境：
 
 ```json
 {
@@ -207,13 +207,30 @@ python -m venv .venv
       "api_domain": "https://api.example.test",
       "environment_type": "test",
       "allow_test_data_mutation": true,
-      "credentials_ref": "environments.example-test"
+      "login_url": "https://console.example.test/login",
+      "account": "LOCAL_ONLY",
+      "password": "LOCAL_ONLY",
+      "authorization": "LOCAL_ONLY",
+      "token_probe": {
+        "url": "https://api.example.test/verified-read-only-endpoint",
+        "headers": {},
+        "response_code_path": "$.code",
+        "success_codes": ["SUCCESS"],
+        "unauthorized_codes": ["TOKEN_EXPIRED"]
+      }
     }
   ]
 }
 ```
 
-生产环境或未显式允许数据变更的环境不能运行 setup/cleanup。
+`token_probe` 和登录字段都是能力声明，不根据环境名称选择逻辑：
+
+- 存在 `token_probe` 时，按其中的数据规则验证当前 Token。
+- Token 失效且 `login_url`、`account`、`password` 完整时，使用 Playwright 自动登录并原子更新当前环境的 `authorization`。
+- 没有 `token_probe` 但登录字段完整时，主动登录获取新 Token。
+- Token 无法验证且缺少完整登录能力时立即阻断。
+
+生产环境或未显式允许数据变更的环境不能运行 setup/cleanup。`credentials_ref`、`healthcheck_success_code` 和 `healthcheck_unauthorized_codes` 属于旧配置字段，不再使用。
 
 ### 4. 配置数据库连接
 
@@ -333,7 +350,7 @@ test-lane-control                Lane 生命周期管理
 修改准备或执行 Skill 后，至少运行：
 
 ```powershell
-python -m pytest .codex/skills/tapd-prepare-test-from/tests/test_skill_contracts.py -q
+python -m unittest discover -s .codex/skills/tapd-prepare-test-from/tests -p "test_*.py" -v
 python -m pytest .codex/skills/test-execute-from-tapd/tests/test_run_test_execution.py -q
 python -m compileall -q .codex/skills/tapd-prepare-test-from/scripts .codex/skills/test-execute-from-tapd/scripts
 git --no-pager diff --check
