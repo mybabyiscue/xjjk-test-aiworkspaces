@@ -1,4 +1,4 @@
 interface:
   display_name: "TAPD Code Source Review"
-  short_description: "Gate and audit TAPD code evidence"
-  default_prompt: "Use $tapd-code-source-review to fetch approved code sources and generate a validated testcase evidence review."
+  short_description: "Review code, requirements, APIs, and database evidence"
+  default_prompt: "Use $tapd-code-source-review to fetch and confirm code, audit changed code and requirement implementation, then produce traceable API, call-chain, gateway, and database evidence."

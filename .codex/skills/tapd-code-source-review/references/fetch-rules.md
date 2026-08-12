@@ -7,6 +7,7 @@
 支持：
 
 - Git HTTP/HTTPS URL 与显式分支，例如 `https://git.example.com/group/service.git#feature-branch`。
+- 仓库根 URL 配合 `preflight_check.py --branch feature-branch`，以及 CNB/GitLab 风格 `/tree/<branch>` 或 `/-/tree/<branch>` 网页 URL；门禁会自动归一化为 `<repo>.git#<branch>`。
 - ZIP 源码包 URL，例如 `https://example.com/service.zip`。
 
 ## URL 类型识别

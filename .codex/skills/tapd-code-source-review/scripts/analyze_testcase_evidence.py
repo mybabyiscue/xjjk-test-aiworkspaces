@@ -12,6 +12,7 @@ from typing import Pattern
 
 from review_policy import read_policy, require_pattern, require_positive_int, require_ratio, require_section, require_string, require_string_list, require_string_map
 from workflow_contract import validate_prepared_review_gate, write_json as write_contract_json
+from codegraph_support import CodeGraphCommandError
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate testcase-driven code evidence reports.")
@@ -64,6 +65,12 @@ def main() -> int:
     services = validate_services(manifest)
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    source_inventory = build_source_inventory(services)
+    write_json(raw_dir / "source_inventory.json", source_inventory)
+    codegraph_queries = run_codegraph_queries(services, raw_dir / "codegraph_queries")
+    write_json(raw_dir / "codegraph_query_status.json", codegraph_queries)
+    prepare_findings = read_json_object(run_dir / "raw" / "prepare_findings.json", "prepare findings") if (run_dir / "raw" / "prepare_findings.json").is_file() else {"findings": []}
+    write_json(raw_dir / "code_findings.json", {"findings": prepare_findings.get("findings", []), "source": "deterministic_scan_candidates"})
 
     java_files, other_files = collect_source_files(services, extensions, primary_source_extensions, excluded_directories, max_file_bytes)
     dto_index = build_java_file_index(java_files)
@@ -93,14 +100,16 @@ def main() -> int:
     write_unresolved_tables(run_dir / "unresolved_tables.md", unresolved_tables(tables))
     write_summary(run_dir / "testcase_evidence_summary.md", cases, mapped_entries, tables, findings)
     update_code_review_report(run_dir / "code_review_report.md", cases, mapped_entries, tables, findings, route_consistency)
+    review_status = "completed" if codegraph_queries.get("status") == "completed" and not findings else "halted"
     write_contract_json(run_dir / "review_status.json", {
-        "status": "completed",
+        "status": review_status,
         "review_run_id": run_dir.name,
         "source_run_id": manifest.get("source_run_id"),
         "interface_count": len(mapped_entries),
         "table_count": len(tables),
         "unresolved_table_count": len(unresolved_tables(tables)),
         "unclosed_case_count": len(findings),
+        "codegraph_query_status": codegraph_queries.get("status"),
         "route_consistency": route_consistency,
     })
     context_inputs = review_context.get("inputs")
@@ -120,6 +129,54 @@ def main() -> int:
         "route_consistency": route_consistency,
     }, ensure_ascii=False))
     return 0
+
+
+def build_source_inventory(services: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "sources": [
+            {
+                "source_id": service.get("service_id", ""),
+                "source_role": service.get("source_role", "unknown"),
+                "source_role_confidence": service.get("source_role_confidence", "low"),
+                "repository_url": service.get("remote_url", service.get("input_url", "")),
+                "requested_ref": service.get("branch", ""),
+                "resolved_commit": service.get("commit", ""),
+                "cache_path": service.get("cache_path", ""),
+                "changed_files": service.get("changed_files", []),
+            }
+            for service in services
+        ]
+    }
+
+
+def run_codegraph_queries(services: list[dict[str, object]], output_dir: Path) -> dict[str, object]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results: list[dict[str, object]] = []
+    for service in services:
+        project_root = Path(str(service["cache_path"])).resolve()
+        source_id = str(service["service_id"])
+        for query_type, arguments in (("symbol", ["query", "Controller", "--path", str(project_root), "--json"]), ("callers", ["callers", "Controller", "--path", str(project_root)]), ("callees", ["callees", "Controller", "--path", str(project_root)]), ("impact", ["impact", "Controller", "--path", str(project_root)])):
+            record: dict[str, object] = {"source_id": source_id, "commit": service.get("commit", ""), "query_type": query_type, "query": {"symbol": "Controller"}, "result": {}, "status": "success", "error": ""}
+            try:
+                completed = subprocess.run([str(resolve_codegraph_executable()), *arguments], cwd=project_root, capture_output=True, text=True, encoding="utf-8", timeout=120, check=True)
+                if query_type == "symbol":
+                    record["result"] = json.loads(completed.stdout)
+                else:
+                    record["result"] = {"text": completed.stdout.strip()}
+            except (CodeGraphCommandError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                record["status"] = "failed"
+                record["error"] = str(exc)
+            results.append(record)
+            (output_dir / f"{source_id}_{query_type}.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+    return {"queries": results, "status": "completed" if all(item["status"] == "success" for item in results) else "blocked"}
+
+
+def resolve_codegraph_executable() -> Path:
+    import shutil
+    executable = shutil.which("codegraph.cmd") or shutil.which("codegraph")
+    if not executable:
+        raise CodeGraphCommandError("CodeGraph executable is unavailable")
+    return Path(executable)
 
 
 def read_json_object(path: Path, label: str) -> dict[str, object]:
@@ -600,13 +657,10 @@ def select_business_entries(
 ) -> list[dict[str, object]]:
     route_roots = infer_testcase_route_roots(entries, cases)
     if not route_roots:
-        if not changed_source_ranges:
-            return entries
-        return [
-            entry
-            for entry in entries
-            if entry_intersects_changed_ranges(entry, changed_source_ranges)
-        ]
+        # Test cases are generated before source review and may contain no routes.
+        # Keep the complete source entry set so unchanged controllers can be mapped
+        # through business tokens and their source call chains.
+        return entries
     return [
         entry for entry in entries
         if route_root(entry_match_route(entry)) in route_roots
@@ -1160,7 +1214,7 @@ def update_code_review_report(path: Path, cases: list[dict[str, object]], entrie
     ])
     existing = path.read_text(encoding="utf-8") if path.exists() else "# 代码审查报告\n"
     pattern = re.compile(re.escape(start_marker) + r"[\s\S]*?" + re.escape(end_marker))
-    updated = pattern.sub(section, existing) if pattern.search(existing) else existing.rstrip() + "\n\n" + section + "\n"
+    updated = pattern.sub(lambda _: section, existing) if pattern.search(existing) else existing.rstrip() + "\n\n" + section + "\n"
     path.write_text(updated, encoding="utf-8", newline="\n")
 
 

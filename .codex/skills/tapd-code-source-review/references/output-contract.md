@@ -30,6 +30,10 @@ output/
 │   ├── runs/
 │   │   └── <review_run_id>/
 │   │       ├── raw/
+│   │       │   ├── source_inventory.json      # 仓库角色、变更和版本清单
+│   │       │   ├── codegraph_queries/        # symbol/callers/callees/impact 查询记录
+│   │       │   ├── gateway_discovery.json    # 自动网关与外部配置发现
+│   │       │   ├── code_findings.json        # 统一代码质量 findings
 │   │       │   ├── parsed_test_cases.json    # 解析出的测试用例数据
 │   │       │   ├── prepare_findings.json      # 代码源初审结构化发现
 │   │       │   ├── code_entry_index.json     # 服务端入口索引

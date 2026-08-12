@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Final
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 REQUIRED_REVIEW_ARTIFACTS: Final[tuple[str, ...]] = (
@@ -63,14 +63,35 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def parse_code_url(value: str) -> tuple[str, str, str]:
+def parse_code_url(value: str, explicit_branch: str) -> tuple[str, str, str]:
     parsed = urlsplit(value.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"Code URL must use HTTP or HTTPS: {value}")
-    clean_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
-    lowered_path = parsed.path.lower()
+    raw_path = parsed.path.rstrip("/")
+    path_parts = [part for part in raw_path.split("/") if part]
+    tree_index = next(
+        (index for index, part in enumerate(path_parts) if part.lower() == "tree"),
+        -1,
+    )
+    branch = explicit_branch.strip() or parsed.fragment.strip()
+    if tree_index >= 0 and tree_index + 1 < len(path_parts):
+        branch = unquote("/".join(path_parts[tree_index + 1 :])).strip()
+        repository_parts = path_parts[:tree_index]
+        if repository_parts and repository_parts[-1] == "-":
+            repository_parts = repository_parts[:-1]
+        raw_path = "/" + "/".join(repository_parts)
+    clean_path = raw_path
+    lowered_path = clean_path.lower()
+    if tree_index >= 0:
+        if not branch:
+            raise ValueError(f"Code tree URL must include a branch: {value}")
+        if not lowered_path.endswith(".git"):
+            clean_path += ".git"
+        clean_url = urlunsplit((parsed.scheme, parsed.netloc, clean_path, "", ""))
+        return clean_url, "git", branch
+    clean_url = urlunsplit((parsed.scheme, parsed.netloc, clean_path, parsed.query, ""))
     if lowered_path.endswith(".git"):
-        branch = parsed.fragment.strip()
+        branch = branch
         if not branch:
             raise ValueError(f"Git URL must include an explicit #branch: {value}")
         return clean_url, "git", branch
@@ -78,7 +99,11 @@ def parse_code_url(value: str) -> tuple[str, str, str]:
         if parsed.fragment:
             raise ValueError(f"ZIP URL must not include a branch fragment: {value}")
         return clean_url, "zip", ""
-    raise ValueError(f"Code URL must end with .git#branch or .zip: {value}")
+    if branch and lowered_path and not lowered_path.endswith(".zip"):
+        if not lowered_path.endswith(".git"):
+            clean_url = urlunsplit((parsed.scheme, parsed.netloc, clean_path + ".git", parsed.query, ""))
+        return clean_url, "git", branch
+    raise ValueError(f"Code URL must end with .git#branch, repository URL plus branch, or .zip: {value}")
 
 
 def parse_mappings(values: list[str], label: str) -> dict[str, str]:

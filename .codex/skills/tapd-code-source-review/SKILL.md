@@ -29,7 +29,7 @@ description: 拉取并人工确认 TAPD 需求相关代码源，使用 CodeGraph
 
 ## 必要输入
 
-- 用户提供的一个或多个 `<HTTPS Git URL>#<branch>` 或 HTTPS ZIP URL。
+- 用户提供的一个或多个 `<HTTPS Git URL>#<branch>`、仓库根 URL 配 `--branch`、CNB/GitLab 风格 `/tree/<branch>` 网页 URL，或 HTTPS ZIP URL。
 - `output/requirement.md`
 - `output/questions.md`
 - `output/test_cases.md`
@@ -51,6 +51,8 @@ python .codex/skills/tapd-code-source-review/scripts/preflight_check.py `
   --metadata-document .codex/skills/xjjk-yewu-sql/state/documents/metadata_document.json `
   --output-root output/code_sources
 ```
+
+仓库根地址也可通过 `--branch feature-branch` 指定分支；CNB/GitLab 地址如 `https://cnb.cool/group/repo/-/tree/feature-branch` 或 `/tree/feature-branch` 会自动归一化为 Git 仓库地址。
 
 记录命令输出的 `<source_run_dir>`，后续步骤必须显式使用该目录。
 
@@ -78,9 +80,18 @@ python .codex/skills/tapd-code-source-review/scripts/approve_code_source.py `
   --approval-note "用户确认代码源与初审结果"
 ```
 
-### 4. 确认平台、网关和疑问处理
+### 4. 自动发现环境与确认剩余歧义
 
-向用户展示可用数据库连接和服务列表。不得猜测平台或网关前缀。
+先执行自动发现：
+
+```powershell
+python .codex/skills/tapd-code-source-review/scripts/discover_gateway_evidence.py `
+  --manifest <source_run_dir>/source_manifest.json
+```
+
+工具必须先扫描本地 Gateway 配置、Java DSL、Controller、前端消费者和 Nacos 导入信息，输出 `raw/gateway_discovery.json` 与 `gateway_discovery.md`。唯一且可校验的候选由工具自动带入 review run；外部配置缺失或候选冲突时才向用户确认。
+
+向用户展示可用数据库连接、自动发现结果和服务角色。不得猜测平台或网关前缀。
 
 每个服务都必须提供：
 
@@ -107,8 +118,7 @@ python .codex/skills/tapd-code-source-review/scripts/prepare_review_run.py `
   --questions output/questions.md `
   --metadata-document .codex/skills/xjjk-yewu-sql/state/documents/metadata_document.json `
   --platform service_alpha="<用户确认的平台>" `
-  --gateway-prefix service_alpha=/gateway-a `
-  --gateway-evidence service_alpha=path/to/gateway.yml:42 `
+  --gateway-auto-discover `
   --questions-decision resolved `
   --questions-note "疑问已由代码证据闭环" `
   --output-root output/code_review
@@ -129,6 +139,8 @@ python .codex/skills/tapd-code-source-review/scripts/analyze_testcase_evidence.p
 ```
 
 ### 7. 基于需求审查实现正确性
+
+需求实现矩阵必须由工具根据 requirement、test cases、变更代码、调用链和真实证据生成初稿。禁止使用只有任意字符串 evidence 的人工 assessment；人工只能修正结论或处理工具标记为不可确定的项。
 
 逐条核对 `requirement.md` 的需求点、验收标准、测试用例与真实代码证据。审查结论只允许：
 
