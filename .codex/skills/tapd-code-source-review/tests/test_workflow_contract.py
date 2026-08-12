@@ -33,7 +33,7 @@ from scripts.workflow_contract import (
 
 def test_parse_code_url_requires_explicit_git_branch() -> None:
     url, source_type, branch = parse_code_url(
-        "https://git.example/team/service.git#feature-123"
+        "https://git.example/team/service.git#feature-123", ""
     )
 
     assert url == "https://git.example/team/service.git"
@@ -41,7 +41,21 @@ def test_parse_code_url_requires_explicit_git_branch() -> None:
     assert branch == "feature-123"
 
     with pytest.raises(ValueError, match="explicit #branch"):
-        parse_code_url("https://git.example/team/service.git")
+        parse_code_url("https://git.example/team/service.git", "")
+
+    url, source_type, branch = parse_code_url(
+        "https://cnb.cool/xjjk/sharkcloud/services/mall4cloud/-/tree/feature-sku-75483", ""
+    )
+    assert url == "https://cnb.cool/xjjk/sharkcloud/services/mall4cloud.git"
+    assert source_type == "git"
+    assert branch == "feature-sku-75483"
+
+    url, source_type, branch = parse_code_url(
+        "https://cnb.cool/xjjk/sharkcloud/services/mall4cloud", "feature-sku-75483"
+    )
+    assert url == "https://cnb.cool/xjjk/sharkcloud/services/mall4cloud.git"
+    assert source_type == "git"
+    assert branch == "feature-sku-75483"
 
 
 def test_source_approval_is_bound_to_manifest_and_codegraph(tmp_path: Path) -> None:
@@ -292,7 +306,7 @@ def test_identifier_aliases_map_changed_purchase_routes_to_chinese_cases() -> No
     assert {entry["route"] for entry in mapped} == {entry["route"] for entry in entries}
 
 
-def test_changed_line_ranges_exclude_unchanged_methods_in_modified_file(tmp_path: Path) -> None:
+def test_route_free_cases_keep_all_source_entries(tmp_path: Path) -> None:
     controller = tmp_path / "OrderController.java"
     controller.write_text("class OrderController {}\n", encoding="utf-8")
     entries = [
@@ -303,7 +317,7 @@ def test_changed_line_ranges_exclude_unchanged_methods_in_modified_file(tmp_path
 
     selected = select_business_entries(entries, [{"routes": []}], changed_ranges)
 
-    assert [entry["route"] for entry in selected] == ["/order/confirm"]
+    assert [entry["route"] for entry in selected] == ["/order/confirm", "/order/pay_info"]
     assert entry_intersects_changed_ranges(entries[0], changed_ranges)
     assert not entry_intersects_changed_ranges(entries[1], changed_ranges)
 

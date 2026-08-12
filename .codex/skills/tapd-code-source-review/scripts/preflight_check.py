@@ -17,6 +17,7 @@ from workflow_contract import parse_code_url, sha256_file
 def main() -> int:
     parser = argparse.ArgumentParser(description="Create tapd-code-source-review preflight outputs.")
     parser.add_argument("--code-url", action="append", required=True, help="HTTP/HTTPS code URL. Repeat for multiple services.")
+    parser.add_argument("--branch", action="append", default=[], help="Branch for each repository URL. May be embedded in /tree/<branch> URLs.")
     parser.add_argument("--test-cases", required=True)
     parser.add_argument("--requirement", required=True)
     parser.add_argument("--questions", required=True)
@@ -45,6 +46,8 @@ def main() -> int:
         Path(args.questions),
         Path(args.metadata_document),
     )
+    if len(args.branch) > len(args.code_url):
+        errors.append("More --branch values were provided than --code-url values")
     for index, url in enumerate(args.code_url, start=1):
         normalized = url.strip()
         service_id = f"service_{index:03d}"
@@ -53,7 +56,8 @@ def main() -> int:
         source_type = "unknown"
         branch = ""
         try:
-            clean_url, source_type, branch = parse_code_url(normalized)
+            explicit_branch = args.branch[index - 1].strip() if index <= len(args.branch) else ""
+            clean_url, source_type, branch = parse_code_url(normalized, explicit_branch)
         except ValueError as exc:
             error = str(exc)
             errors.append(f"{service_id}: {error}")
@@ -70,6 +74,8 @@ def main() -> int:
                 "fetch_status": "pending" if not error else "failed",
                 "url_hash": hashlib.sha256(f"{clean_url}#{branch}".encode("utf-8")).hexdigest()[:16],
                 "error": error,
+                "source_role": infer_source_role(clean_url),
+                "source_role_confidence": "medium",
             }
         )
 
@@ -110,6 +116,20 @@ def resolve_name(url: str) -> str:
     if name.endswith(".zip"):
         name = name[:-4]
     return name or "unknown-source"
+
+
+def infer_source_role(url: str) -> str:
+    """Infer only a generic repository role from path markers; never invent business roles."""
+    lowered = urlparse(url).path.lower()
+    if any(marker in lowered for marker in ("frontend", "web", "admin-ui", "mall4cloud-ui")):
+        return "frontend"
+    if "gateway" in lowered:
+        return "gateway"
+    if any(marker in lowered for marker in ("shared", "common", "api")):
+        return "shared"
+    if any(marker in lowered for marker in ("service", "backend", "server")):
+        return "backend"
+    return "unknown"
 
 
 def validate_required_inputs(

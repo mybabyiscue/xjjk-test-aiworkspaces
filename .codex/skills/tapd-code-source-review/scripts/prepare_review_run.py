@@ -29,8 +29,9 @@ def main() -> int:
     parser.add_argument("--questions", required=True)
     parser.add_argument("--metadata-document", required=True)
     parser.add_argument("--platform", action="append", required=True)
-    parser.add_argument("--gateway-prefix", action="append", required=True)
-    parser.add_argument("--gateway-evidence", action="append", required=True)
+    parser.add_argument("--gateway-prefix", action="append")
+    parser.add_argument("--gateway-evidence", action="append")
+    parser.add_argument("--gateway-auto-discover", action="store_true")
     parser.add_argument("--gateway-prefix-rule", action="append")
     parser.add_argument("--gateway-evidence-rule", action="append")
     parser.add_argument("--questions-decision", choices=("resolved", "ignored"), required=True)
@@ -48,8 +49,9 @@ def main() -> int:
     service_ids = {str(source["service_id"]) for source in sources}
 
     platforms = parse_mappings(args.platform, "platform")
-    gateway_prefixes = parse_mappings(args.gateway_prefix, "gateway prefix")
-    gateway_evidence = parse_mappings(args.gateway_evidence, "gateway evidence")
+    gateway_prefixes, gateway_evidence = resolve_gateway_inputs(
+        args.gateway_prefix or [], args.gateway_evidence or [], source_run_dir, service_ids, args.gateway_auto_discover
+    )
     gateway_prefix_rules = parse_mappings(args.gateway_prefix_rule or [], "gateway prefix rule")
     gateway_evidence_rules = parse_mappings(args.gateway_evidence_rule or [], "gateway evidence rule")
     require_exact_service_mappings(service_ids, platforms, "platform")
@@ -119,6 +121,47 @@ def main() -> int:
     write_json(run_dir / "review_context.json", context)
     print(str(run_dir))
     return 0
+
+
+def resolve_gateway_inputs(
+    prefixes: list[str],
+    evidence: list[str],
+    source_run_dir: Path,
+    service_ids: set[str],
+    auto_discover: bool,
+) -> tuple[dict[str, str], dict[str, str]]:
+    if prefixes or evidence:
+        if not prefixes or not evidence:
+            raise ValueError("gateway prefix and gateway evidence must be provided together")
+        return parse_mappings(prefixes, "gateway prefix"), parse_mappings(evidence, "gateway evidence")
+    if not auto_discover:
+        raise ValueError("Missing gateway mappings. Run discover_gateway_evidence.py or pass --gateway-auto-discover.")
+    discovery_path = source_run_dir / "raw" / "gateway_discovery.json"
+    if not discovery_path.is_file():
+        raise FileNotFoundError(f"Missing gateway discovery output: {discovery_path}")
+    payload = json.loads(discovery_path.read_text(encoding="utf-8"))
+    raw_candidates = payload.get("candidates")
+    if not isinstance(raw_candidates, list):
+        raise TypeError("gateway_discovery.json.candidates must be a list")
+    result_prefixes: dict[str, str] = {}
+    result_evidence: dict[str, str] = {}
+    for service_id in service_ids:
+        candidates = [item for item in raw_candidates if isinstance(item, dict) and item.get("source_id") == service_id and str(item.get("candidate_prefix", "")).strip() and item.get("evidence_type") == "local_gateway"]
+        normalized = {normalize_gateway_prefix(str(item["candidate_prefix"])) for item in candidates}
+        if len(normalized) != 1:
+            raise ValueError(f"Gateway prefix unresolved for {service_id}; candidates={sorted(normalized)}. Review gateway_discovery.md and provide external config evidence.")
+        candidate = candidates[0]
+        raw_evidence = candidate.get("evidence")
+        if not isinstance(raw_evidence, list) or not raw_evidence or not isinstance(raw_evidence[0], dict):
+            raise ValueError(f"Gateway evidence unresolved for {service_id}; candidate has no verifiable evidence")
+        evidence_item = raw_evidence[0]
+        evidence_file = str(evidence_item.get("file", ""))
+        line = evidence_item.get("line")
+        if not evidence_file or not isinstance(line, int):
+            raise ValueError(f"Gateway evidence unresolved for {service_id}; malformed evidence")
+        result_prefixes[service_id] = next(iter(normalized))
+        result_evidence[service_id] = f"{evidence_file}:{line}"
+    return result_prefixes, result_evidence
 
 
 def require_file(path: Path, label: str) -> Path:

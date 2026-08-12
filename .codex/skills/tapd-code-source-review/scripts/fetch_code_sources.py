@@ -10,6 +10,7 @@ import subprocess
 import urllib.error
 import urllib.request
 import zipfile
+import os
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -33,7 +34,7 @@ def main() -> int:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     output_root = Path(args.output_root)
     cache_root = output_root / "cache"
-    errors = []
+    errors: list[str] = []
 
     for source in manifest.get("code_sources", []):
         try:
@@ -46,6 +47,7 @@ def main() -> int:
             urllib.error.URLError,
         ) as exc:
             source["fetch_status"] = "failed"
+            source["stage_status"] = "blocked"
             source["error"] = str(exc)
             errors.append(f"{source.get('service_id')}: {exc}")
             manifest["errors"] = list(dict.fromkeys([*manifest.get("errors", []), *errors]))
@@ -55,7 +57,6 @@ def main() -> int:
                 newline="\n",
             )
             write_fetch_result(manifest_path.parent / "code_fetch_result.md", manifest)
-            sync_latest_if_run_dir(manifest_path)
             raise
 
     for source in manifest.get("code_sources", []):
@@ -63,11 +64,11 @@ def main() -> int:
         index_result = prepare_codegraph_index(codegraph_environment, cache_path)
         source["codegraph_action"] = index_result.action
         source["codegraph_status"] = "healthy"
+        source["stage_status"] = "completed"
 
     manifest["errors"] = []
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
     write_fetch_result(manifest_path.parent / "code_fetch_result.md", manifest)
-    sync_latest_if_run_dir(manifest_path)
     return 0
 
 
@@ -98,7 +99,9 @@ def fetch_git(source: dict, target: Path) -> None:
         run_git(["git", "-C", str(target), "merge", "--ff-only", f"origin/{requested_branch}"])
     commit = run_git(["git", "-C", str(target), "rev-parse", "HEAD"]).strip()
     branch = run_git(["git", "-C", str(target), "rev-parse", "--abbrev-ref", "HEAD"]).strip()
-    source.update({"cache_path": str(target), "commit": commit, "branch": branch, "fetch_status": "success", "error": ""})
+    remote = run_git(["git", "-C", str(target), "remote", "get-url", "origin"]).strip()
+    changed_files = run_git(["git", "-C", str(target), "diff", "--name-only", f"{commit}^", commit]).splitlines()
+    source.update({"cache_path": str(target), "commit": commit, "branch": branch, "remote_url": remote, "changed_files": changed_files, "fetch_status": "success", "error": ""})
 
 
 def fetch_zip(source: dict, target: Path) -> None:
@@ -124,12 +127,15 @@ def run_git(command: list[str]) -> str:
 
 
 def run_git_once(command: list[str]) -> str:
+    environment = os.environ.copy()
+    environment.setdefault("GIT_TERMINAL_PROMPT", "0")
     completed = subprocess.run(
         command,
         check=True,
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=environment,
     )
     return completed.stdout
 

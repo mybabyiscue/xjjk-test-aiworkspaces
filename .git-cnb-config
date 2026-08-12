@@ -1,0 +1,2 @@
+[credential]
+	helper = store --file=C:/Users/Administrator/.git-credentials
