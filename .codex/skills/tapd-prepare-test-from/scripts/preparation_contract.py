@@ -10,11 +10,11 @@ from typing import TypeAlias
 
 JsonObject: TypeAlias = dict[str, object]
 AUDIT_STATUSES: frozenset[str] = frozenset({"待审核", "可审核", "阻断", "已通过", "已驳回"})
-NON_INTERFACE_CLASSIFICATIONS: frozenset[str] = frozenset({"ui_only", "blocked"})
+NON_INTERFACE_CLASSIFICATIONS: frozenset[str] = frozenset({"ui_only", "manual_only", "blocked"})
 NEGATIVE_VARIANT_POLICIES: frozenset[str] = frozenset({"covered", "no_verifiable_validation_rule"})
 VALID_VARIANT_TYPES: frozenset[str] = frozenset({"positive", "negative"})
 FORBIDDEN_SCENARIO_CATEGORY_MARKERS: frozenset[str] = frozenset({"todo", "n/a", "待定", "tbd", "unknown", "placeholder"})
-DATA_PREPARATION_STRATEGIES: frozenset[str] = frozenset({"reuse", "api_create", "sql_insert", "manual_create"})
+DATA_PREPARATION_STRATEGIES: frozenset[str] = frozenset({"reuse", "api_create", "api_snapshot_restore", "sql_insert", "manual_create"})
 DATA_ACTION_TYPES: frozenset[str] = frozenset({"http", "sql_insert", "sql_delete"})
 AUTOMATED_DATA_STRATEGIES: frozenset[str] = frozenset({"api_create", "sql_insert"})
 MUTATING_ACTION_TYPES: frozenset[str] = frozenset({"http", "sql_insert"})
@@ -372,7 +372,7 @@ def data_preparation_errors(
             isolation_prefix: str = require_string(raw_entry.get("isolation_prefix"), f"{field_name}.isolation_prefix")
             if not isolation_prefix.startswith("TEST_"):
                 errors.append(f"{field_name}.isolation_prefix 必须以 TEST_ 开头。")
-            setup_type: str = "http" if strategy == "api_create" else "sql_insert"
+            setup_type: str = "http" if strategy in {"api_create", "api_snapshot_restore"} else "sql_insert"
             errors.extend(data_action_errors(setup, f"{field_name}.setup", {setup_type}, action_ids, evidence_lookup))
             errors.extend(data_action_errors(cleanup, f"{field_name}.cleanup", {"http", "sql_delete"}, action_ids, evidence_lookup))
         except PreparationError as error:

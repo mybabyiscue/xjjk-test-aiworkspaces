@@ -921,6 +921,8 @@ def redact(value: object) -> object:
 
 def build_headers(request: JsonObject, environment: JsonObject) -> dict[str, str]:
     headers: dict[str, str] = validate_headers(request.get("headers"), "request.headers")
+    if request.get("body") is not None and not any(name.lower() == "content-type" for name in headers):
+        headers["Content-Type"] = "application/json"
     authorization_header: object = request.get("authorization_header")
     if isinstance(authorization_header, str) and authorization_header:
         token: str = require_string(environment.get("authorization"), f"environment[{environment.get('name')}].authorization")
@@ -1102,7 +1104,12 @@ def markdown_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
-def render_interface_report(results: list[JsonObject], environment_name: str) -> str:
+def render_interface_report(
+    results: list[JsonObject],
+    environment_name: str,
+    setup_results: list[JsonObject],
+    cleanup_results: list[JsonObject],
+) -> str:
     executed: list[JsonObject] = [item for item in results if item.get("status") in {"PASS", "FAIL"}]
     passed_count: int = sum(1 for item in executed if item.get("status") == "PASS")
     pass_rate: float = (passed_count / len(executed) * 100.0) if executed else 0.0
@@ -1120,6 +1127,23 @@ def render_interface_report(results: list[JsonObject], environment_name: str) ->
     ]
     for result in results:
         lines.append(f"| {result.get('id')} | {', '.join(str(item) for item in result.get('case_ids', []))} | {result.get('variant_type')} | {result.get('status')} | {result.get('http_status', '')} |")
+    lines.extend([
+        "",
+        "## Data lifecycle actions",
+        "",
+        "| Phase | Action ID | Entry ID | Type | Status | HTTP status | Expected business code | Actual business code |",
+        "|---|---|---|---|---|---:|---|---|",
+    ])
+    for phase, lifecycle_results in (("setup", setup_results), ("cleanup", cleanup_results)):
+        for result in lifecycle_results:
+            lines.append(
+                f"| {phase} | {result.get('id')} | {result.get('entry_id', '')} | "
+                f"{result.get('type', '')} | {result.get('status')} | {result.get('http_status', '')} | "
+                f"{result.get('expected_business_code', '')} | {result.get('actual_business_code', '')} |"
+            )
+    for phase, lifecycle_results in (("setup", setup_results), ("cleanup", cleanup_results)):
+        for result in lifecycle_results:
+            lines.extend(["", f"### {phase}: {result.get('id')}", "", "```json", markdown_json(result), "```"])
     for result in results:
         lines.extend(["", f"## {result.get('id')}", "", "```json", markdown_json(result), "```"])
     return "\n".join(lines).strip() + "\n"
@@ -1289,13 +1313,18 @@ def main() -> int:
         except SystemExit as cleanup_error:
             pending_error = cleanup_error
         append_manifest(manifest_path, lifecycle_rows + interface_rows + flow_rows)
-    if pending_error is not None:
-        raise pending_error
     write_reports(
         output_dir,
-        render_interface_report(interface_results, arguments.environment_name),
+        render_interface_report(
+            interface_results,
+            arguments.environment_name,
+            setup_results,
+            cleanup_results,
+        ),
         render_flow_report(flow_results, arguments.environment_name),
     )
+    if pending_error is not None:
+        raise pending_error
     has_execution_errors: bool = any(result.get("status") == "EXECUTION_ERROR" for result in interface_results)
     has_flow_errors: bool = any(result.get("status") == "INTERRUPTED" for result in flow_results)
     has_failures: bool = any(result.get("status") == "FAIL" for result in interface_results)

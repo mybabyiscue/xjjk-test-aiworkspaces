@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Pattern
 
 from review_policy import read_policy, require_pattern, require_positive_int, require_ratio, require_section, require_string, require_string_list, require_string_map
-from workflow_contract import validate_prepared_review_gate, write_json as write_contract_json
+from workflow_contract import (
+    CORE_PROCESS_INTERFACE_HEADERS,
+    TABLE_INFORMATION_HEADERS,
+    UNIT_TEST_INTERFACE_HEADERS,
+    markdown_table_lines,
+    validate_prepared_review_gate,
+    write_json as write_contract_json,
+)
 from codegraph_support import CodeGraphCommandError
 
 def main() -> int:
@@ -83,7 +90,7 @@ def main() -> int:
     mapped_entries = map_cases_to_entries(selected_entries, cases, matching_policy)
     call_chains = build_call_chains(mapped_entries, java_files, method_declaration_pattern, interface_policy)
     require_platforms(mapped_entries, services)
-    tables = resolve_tables(mapped_entries, call_chains, java_files, metadata, services, table_annotation_pattern, require_pattern(interface_policy, "entity_reference_pattern"), interface_policy, table_policy)
+    tables = resolve_tables(mapped_entries, call_chains, java_files, other_files, cases, metadata, services, table_annotation_pattern, require_pattern(interface_policy, "entity_reference_pattern"), interface_policy, table_policy)
     findings = find_unclosed_cases(cases, mapped_entries)
 
     write_json(raw_dir / "parsed_test_cases.json", {"cases": cases})
@@ -142,6 +149,8 @@ def build_source_inventory(services: list[dict[str, object]]) -> dict[str, objec
                 "requested_ref": service.get("branch", ""),
                 "resolved_commit": service.get("commit", ""),
                 "cache_path": service.get("cache_path", ""),
+                "source_scope": service.get("source_scope", ""),
+                "scan_root": str(source_scan_root(service)),
                 "changed_files": service.get("changed_files", []),
             }
             for service in services
@@ -204,10 +213,29 @@ def validate_services(manifest: dict[str, object]) -> list[dict[str, object]]:
         service_id = raw_service.get("service_id")
         if not isinstance(cache_path, str) or not Path(cache_path).exists():
             raise FileNotFoundError(f"Unreadable cache path for {service_id}: {cache_path}")
+        source_scan_root(raw_service)
         services.append(raw_service)
     if not services:
         raise ValueError("No successful code sources are available")
     return services
+
+
+def source_scan_root(service: dict[str, object]) -> Path:
+    repository_root = Path(str(service.get("cache_path", ""))).resolve()
+    raw_scope = str(service.get("source_scope", "")).replace("\\", "/").strip("/")
+    if not raw_scope:
+        return repository_root
+    relative_scope = Path(raw_scope)
+    if relative_scope.is_absolute() or ".." in relative_scope.parts:
+        raise ValueError(f"Invalid source scope for {service.get('service_id', '')}: {raw_scope}")
+    scoped_root = (repository_root / relative_scope).resolve()
+    try:
+        scoped_root.relative_to(repository_root)
+    except ValueError as exc:
+        raise ValueError(f"Source scope escapes repository root: {raw_scope}") from exc
+    if not scoped_root.is_dir():
+        raise FileNotFoundError(f"Source scope directory does not exist: {scoped_root}")
+    return scoped_root
 
 
 def require_platforms(entries: list[dict[str, object]], services: list[dict[str, object]]) -> None:
@@ -254,7 +282,7 @@ def collect_source_files(services: list[dict[str, object]], extensions: set[str]
     other_files: list[dict[str, str]] = []
     for service in services:
         service_id = str(service.get("service_id", ""))
-        root = Path(str(service["cache_path"]))
+        root = source_scan_root(service)
         for path in root.rglob("*"):
             if not path.is_file() or path.suffix.lower() not in extensions:
                 continue
@@ -716,6 +744,8 @@ def map_cases_to_entries(entries: list[dict[str, object]], cases: list[dict[str,
     short_token_weight = require_positive_int(matching_policy, "short_token_weight")
     long_token_weight = require_positive_int(matching_policy, "long_token_weight")
     chinese_token_weight = require_positive_int(matching_policy, "chinese_token_weight")
+    action_only_alias_keys = set(require_string_list(matching_policy, "action_only_alias_keys"))
+    unmatched_identifier_penalty = require_positive_int(matching_policy, "unmatched_identifier_penalty")
     identifier_aliases = require_alias_map(matching_policy, "identifier_aliases")
     token_frequency: Counter[str] = Counter()
     for entry in entries:
@@ -737,6 +767,8 @@ def map_cases_to_entries(entries: list[dict[str, object]], cases: list[dict[str,
                 long_token_weight,
                 chinese_token_weight,
                 identifier_aliases,
+                action_only_alias_keys,
+                unmatched_identifier_penalty,
             )
             for case in cases
         })
@@ -784,7 +816,7 @@ def map_cases_to_entries(entries: list[dict[str, object]], cases: list[dict[str,
     return mapped
 
 
-def case_entry_score(case: dict[str, object], entry: dict[str, object], token_frequency: Counter[str], entry_count: int, minimum_token_document_frequency: int, maximum_token_document_frequency_ratio: float, minimum_scored_token_length: int, minimum_chinese_scored_token_length: int, long_token_length: int, short_token_weight: int, long_token_weight: int, chinese_token_weight: int, identifier_aliases: dict[str, list[str]]) -> int:
+def case_entry_score(case: dict[str, object], entry: dict[str, object], token_frequency: Counter[str], entry_count: int, minimum_token_document_frequency: int, maximum_token_document_frequency_ratio: float, minimum_scored_token_length: int, minimum_chinese_scored_token_length: int, long_token_length: int, short_token_weight: int, long_token_weight: int, chinese_token_weight: int, identifier_aliases: dict[str, list[str]], action_only_alias_keys: set[str], unmatched_identifier_penalty: int) -> int:
     case_tokens = set(as_string_list(case["tokens"]))
     entry_tokens = expand_entry_aliases(entry, identifier_aliases)
     alias_tokens = {alias for aliases in identifier_aliases.values() for alias in aliases}
@@ -794,12 +826,27 @@ def case_entry_score(case: dict[str, object], entry: dict[str, object], token_fr
         if token_is_scorable(token, alias_tokens, minimum_scored_token_length, minimum_chinese_scored_token_length)
         and token_frequency[token] <= maximum_frequency
     }
-    return sum(
+    action_only_aliases = {
+        alias
+        for key in action_only_alias_keys
+        for alias in identifier_aliases.get(key, [])
+    }
+    if shared and shared <= action_only_aliases:
+        return 0
+    score = sum(
         chinese_token_weight
         if token in alias_tokens
         else long_token_weight if len(token) >= long_token_length else short_token_weight
         for token in shared
     )
+    identifiers = set(as_string_list(entry.get("identifier_tokens", [])))
+    unmatched_identifiers = {
+        token
+        for token in identifiers - action_only_alias_keys
+        if token not in case_tokens
+        and not (set(identifier_aliases.get(token, [])) & case_tokens)
+    }
+    return max(0, score - unmatched_identifier_penalty * len(unmatched_identifiers))
 
 
 def require_alias_map(payload: dict[str, object], key: str) -> dict[str, list[str]]:
@@ -924,7 +971,7 @@ def find_method_body(text: str, method_name: str, method_declaration_pattern: Pa
     return ""
 
 
-def resolve_tables(entries: list[dict[str, object]], chains: list[dict[str, object]], java_files: list[dict[str, str]], metadata: dict[str, list[dict[str, object]]], services: list[dict[str, object]], table_annotation_pattern: Pattern[str], entity_reference_pattern: Pattern[str], interface_policy: dict[str, object], table_policy: dict[str, object]) -> list[dict[str, object]]:
+def resolve_tables(entries: list[dict[str, object]], chains: list[dict[str, object]], java_files: list[dict[str, str]], other_files: list[dict[str, str]], cases: list[dict[str, object]], metadata: dict[str, list[dict[str, object]]], services: list[dict[str, object]], table_annotation_pattern: Pattern[str], entity_reference_pattern: Pattern[str], interface_policy: dict[str, object], table_policy: dict[str, object]) -> list[dict[str, object]]:
     selected_identifiers = infer_domain_identifiers(entries)
     persistence_type_suffixes = require_string_list(interface_policy, "persistence_type_suffixes")
     validation_annotations = set(require_string_list(interface_policy, "validation_annotations"))
@@ -1001,6 +1048,77 @@ def resolve_tables(entries: list[dict[str, object]], chains: list[dict[str, obje
             "operations": infer_operations(table_name, java_files, mapper_names, sql_operations, max_sql_table_distance_characters, operation_fallback_label),
             "tenant_isolation": infer_tenant_isolation(table_name, java_files, tenant_filter_fields),
         })
+    case_identifiers = {
+        token.casefold()
+        for case in cases
+        for token in as_string_list(case.get("tokens", []))
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", token) and len(token) >= 3
+    }
+    mapper_chain_cases: dict[str, set[str]] = defaultdict(set)
+    mapper_chain_signatures: dict[str, set[str]] = defaultdict(set)
+    for chain in chains:
+        for dependency in as_string_list(chain.get("dependencies", [])):
+            matching_suffix = next(
+                (suffix for suffix in persistence_type_suffixes if dependency.endswith(suffix)),
+                "",
+            )
+            if not matching_suffix:
+                continue
+            mapper_domain = dependency[: -len(matching_suffix)].casefold()
+            if mapper_domain not in case_identifiers:
+                continue
+            mapper_chain_cases[dependency].update(as_string_list(chain.get("case_ids", [])))
+            mapper_chain_signatures[dependency].add(str(chain.get("signature", "")))
+    sql_table_pattern = re.compile(
+        r"(?i)\b(?:from|join|insert\s+into|update|delete\s+from)\s+[`\"]?([A-Za-z_][A-Za-z0-9_.]*)"
+    )
+    for item in other_files:
+        mapper_name = Path(item["path"]).stem
+        if mapper_name not in mapper_chain_cases:
+            continue
+        for match in sql_table_pattern.finditer(item["text"]):
+            raw_table_name = match.group(1).strip("`\"")
+            table_name = raw_table_name.rsplit(".", 1)[-1]
+            if table_name.casefold() not in case_identifiers:
+                continue
+            service = service_platform.get(item["service_id"], {})
+            configured_connection = service.get("metadata_connection")
+            matches = [
+                candidate
+                for candidate in metadata.get(table_name, [])
+                if not configured_connection or candidate.get("connection") == configured_connection
+            ]
+            platform_confirmed = service.get("platform_status") == "confirmed" or bool(service.get("platform_name"))
+            if len(matches) == 1 and platform_confirmed:
+                grade = "A" if "." in raw_table_name else "B"
+                qualified_name = f"{matches[0]['schema']}.{table_name}"
+                status = "confirmed"
+            elif len(matches) > 1:
+                grade = "-"
+                qualified_name = " / ".join(f"{candidate['schema']}.{table_name}" for candidate in matches)
+                status = "multiple_matches"
+            else:
+                grade = "C" if platform_confirmed else "D"
+                qualified_name = f"{unresolved_schema_label}.{table_name}"
+                status = "metadata_unresolved"
+            tables.append({
+                "service_id": item["service_id"],
+                "platform": service.get("platform_name") or "待确认",
+                "table_name": table_name,
+                "qualified_name": qualified_name,
+                "grade": grade,
+                "status": status,
+                "case_ids": sorted(mapper_chain_cases[mapper_name]),
+                "call_chains": sorted(mapper_chain_signatures[mapper_name]),
+                "source_file": item["path"],
+                "source_line": line_number(item["text"], match.start()),
+                "fields": matches[0].get("columns", []) if len(matches) == 1 else [],
+                "indexes": matches[0].get("indexes", {}) if len(matches) == 1 else {},
+                "constraints": matches[0].get("constraints", {}) if len(matches) == 1 else {},
+                "table_comment": matches[0].get("comment", "") if len(matches) == 1 else "",
+                "operations": infer_operations(table_name, other_files, {mapper_name}, sql_operations, max_sql_table_distance_characters, operation_fallback_label),
+                "tenant_isolation": infer_tenant_isolation(table_name, other_files, tenant_filter_fields),
+            })
     return dedupe(tables, ("service_id", "table_name"))
 
 
@@ -1076,10 +1194,11 @@ def find_unclosed_cases(cases: list[dict[str, object]], entries: list[dict[str, 
 
 
 def write_core_interfaces(path: Path, entries: list[dict[str, object]], findings: list[dict[str, str]]) -> None:
+    header, separator = markdown_table_lines(CORE_PROCESS_INTERFACE_HEADERS)
     lines = [
         "# 核心流程接口文档", "", "## 一、核心流程接口清单", "",
-        "| 用例编号 | 接口名称/描述 | 接口类型与地址 | 请求参数 | 返回参数 | 调用链路 | 代码位置 |",
-        "|---|---|---|---|---|---|---|",
+        header,
+        separator,
     ]
     for entry in entries:
         params = format_params(entry.get("params", []))
@@ -1092,10 +1211,11 @@ def write_core_interfaces(path: Path, entries: list[dict[str, object]], findings
 
 def write_unit_interfaces(path: Path, entries: list[dict[str, object]], chains: list[dict[str, object]], java_files: list[dict[str, str]], findings: list[dict[str, str]], test_path_segments: list[str]) -> None:
     tests = [item for item in java_files if any(segment.lower() in item["path"].lower() for segment in test_path_segments)]
+    header, separator = markdown_table_lines(UNIT_TEST_INTERFACE_HEADERS)
     lines = [
         "# 单元测试接口文档", "", "## 一、单元测试目标接口清单", "",
-        "| 用例编号 | 方法签名 | 输入边界场景 | 需隔离的外部依赖 | 当前覆盖状态 | 代码位置 |",
-        "|---|---|---|---|---|---|",
+        header,
+        separator,
     ]
     chain_map = {str(chain["signature"]): chain for chain in chains}
     for entry in entries:
@@ -1111,10 +1231,11 @@ def write_unit_interfaces(path: Path, entries: list[dict[str, object]], chains: 
 
 
 def write_table_report(path: Path, tables: list[dict[str, object]], findings: list[dict[str, str]], max_report_fields: int) -> None:
+    header, separator = markdown_table_lines(TABLE_INFORMATION_HEADERS)
     lines = [
         "# 用例中所使用的数据表文档", "", "## 一、关联数据表清单", "",
-        "| 用例编号 | 所属平台 | 库.表名 | 物理注释 | 确认等级 | 判定依据说明 | 关键字段 | 读/写类型 | 租户隔离 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        header,
+        separator,
     ]
     for table in tables:
         fields = table.get("fields", [])

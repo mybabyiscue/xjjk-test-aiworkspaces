@@ -29,6 +29,7 @@ def main() -> int:
     parser.add_argument("--questions", required=True)
     parser.add_argument("--metadata-document", required=True)
     parser.add_argument("--platform", action="append", required=True)
+    parser.add_argument("--source-scope", action="append")
     parser.add_argument("--gateway-prefix", action="append")
     parser.add_argument("--gateway-evidence", action="append")
     parser.add_argument("--gateway-auto-discover", action="store_true")
@@ -49,6 +50,7 @@ def main() -> int:
     service_ids = {str(source["service_id"]) for source in sources}
 
     platforms = parse_mappings(args.platform, "platform")
+    source_scopes = validate_source_scopes(sources, parse_mappings(args.source_scope or [], "source scope"))
     gateway_prefixes, gateway_evidence = resolve_gateway_inputs(
         args.gateway_prefix or [], args.gateway_evidence or [], source_run_dir, service_ids, args.gateway_auto_discover
     )
@@ -85,6 +87,7 @@ def main() -> int:
         source["metadata_connection"] = platforms[service_id]
         source["platform_name"] = platforms[service_id]
         source["platform_status"] = "confirmed"
+        source["source_scope"] = source_scopes[service_id]
         source["gateway_prefix"] = normalize_gateway_prefix(gateway_prefixes[service_id])
         source["gateway_evidence"] = gateway_evidence[service_id]
         source["gateway_prefix_rules"] = gateway_rules.get(service_id, [])
@@ -169,6 +172,36 @@ def require_file(path: Path, label: str) -> Path:
     if not resolved.is_file():
         raise FileNotFoundError(f"Missing {label}: {resolved}")
     return resolved
+
+
+def validate_source_scopes(
+    sources: list[dict[str, object]],
+    mappings: dict[str, str],
+) -> dict[str, str]:
+    service_ids = {str(source.get("service_id", "")) for source in sources}
+    extra = sorted(set(mappings) - service_ids)
+    if extra:
+        raise ValueError(f"Invalid source scope mappings; unknown services={extra}")
+    scopes: dict[str, str] = {}
+    for source in sources:
+        service_id = str(source.get("service_id", ""))
+        raw_scope = mappings.get(service_id, "").replace("\\", "/").strip("/")
+        if not raw_scope:
+            scopes[service_id] = ""
+            continue
+        relative_scope = Path(raw_scope)
+        if relative_scope.is_absolute() or ".." in relative_scope.parts:
+            raise ValueError(f"Source scope must be a repository-relative directory: {service_id}={raw_scope}")
+        repository_root = Path(str(source.get("cache_path", ""))).resolve()
+        scoped_root = (repository_root / relative_scope).resolve()
+        try:
+            scoped_root.relative_to(repository_root)
+        except ValueError as exc:
+            raise ValueError(f"Source scope escapes repository root: {service_id}={raw_scope}") from exc
+        if not scoped_root.is_dir():
+            raise FileNotFoundError(f"Source scope directory does not exist: {service_id}={raw_scope}")
+        scopes[service_id] = relative_scope.as_posix()
+    return scopes
 
 
 def validate_gateway_mappings(prefixes: dict[str, str], evidence: dict[str, str]) -> dict[str, dict[str, object]]:

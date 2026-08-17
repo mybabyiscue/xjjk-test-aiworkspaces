@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from workflow_contract import (
     review_input_path,
     sha256_file,
     validate_prepared_review_gate,
+    validate_review_document_schemas,
     write_json,
 )
 
@@ -54,6 +56,8 @@ def main() -> int:
             "Requirement implementation review is halted; record the user's explicit decision before publishing"
         )
 
+    validate_review_document_schemas(run_dir)
+    validate_core_interface_evidence_alignment(run_dir)
     hashes = artifact_hashes(run_dir)
     unresolved = read_json_object(run_dir / "raw" / "table_resolution.json", "table resolution")
     raw_tables = unresolved.get("tables")
@@ -112,6 +116,34 @@ def require_non_negative_count(payload: dict[str, object], key: str) -> int:
     if not isinstance(value, int) or value < 0:
         raise ValueError(f"route consistency field {key} must be a non-negative integer")
     return value
+
+
+def validate_core_interface_evidence_alignment(run_dir: Path) -> None:
+    evidence = read_json_object(
+        run_dir / "raw" / "testcase_interface_evidence.json", "testcase interface evidence"
+    )
+    raw_interfaces = evidence.get("interfaces")
+    if not isinstance(raw_interfaces, list):
+        raise TypeError("testcase_interface_evidence.json.interfaces must be a list")
+    evidence_signatures: set[str] = {
+        f"{item.get('http_method')} {item.get('route')}"
+        for item in raw_interfaces
+        if isinstance(item, dict) and item.get("http_method") and item.get("route")
+    }
+    core_signatures: set[str] = set()
+    for line in (run_dir / "core_process_interfaces.md").read_text(encoding="utf-8-sig").splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 3 and re.fullmatch(r"(?:GET|POST|PUT|DELETE|PATCH) /\S+", cells[2]):
+            core_signatures.add(cells[2])
+    missing = sorted(core_signatures - evidence_signatures)
+    extra = sorted(evidence_signatures - core_signatures)
+    if missing or extra:
+        raise ValueError(
+            "Structured interface evidence must exactly match reviewed core routes; "
+            f"missing={missing}, extra={extra}"
+        )
 
 
 def publish_directory(run_dir: Path, latest_dir: Path) -> None:

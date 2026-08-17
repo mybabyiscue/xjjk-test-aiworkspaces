@@ -118,6 +118,7 @@ python .codex/skills/tapd-code-source-review/scripts/prepare_review_run.py `
   --questions output/questions.md `
   --metadata-document .codex/skills/xjjk-yewu-sql/state/documents/metadata_document.json `
   --platform service_alpha="<用户确认的平台>" `
+  --source-scope service_alpha="<已批准的仓库相对模块路径>" `
   --gateway-auto-discover `
   --questions-decision resolved `
   --questions-note "疑问已由代码证据闭环" `
@@ -125,6 +126,8 @@ python .codex/skills/tapd-code-source-review/scripts/prepare_review_run.py `
 ```
 
 记录命令输出的 `<review_run_dir>`。
+
+当一个代码源是多模块单仓且用户批准范围只包含其中部分模块时，必须使用 `--source-scope service_id=relative/module/path` 限定扫描根目录。该路径必须是代码缓存根目录内真实存在的相对目录；禁止生成后再手工删除范围外接口或表。未指定时扫描整个已批准代码源。
 
 ### 6. 生成接口、调用链与表证据底稿
 
@@ -189,6 +192,8 @@ python .codex/skills/tapd-code-source-review/scripts/validate_publish_review.py 
 
 发布前必须确认 `gateway_route_conflict`、`ambiguous_gateway_route`、`gateway_evidence_unresolved` 均为 0；否则保留当前 `runs/<review_run_id>/`，写入失败的 `review_validation.json`，不得更新 `latest/`。
 
+发布校验还必须按 [输出契约](references/output-contract.md) 检查 `unit_test_interfaces.md`、`core_process_interfaces.md`、`table_information.md` 的首个 Markdown 表。任一文档缺表、表头字段或顺序与共享契约不一致时，必须阻断发布；不得依赖下游技能再发现结构错误。
+
 ### 8. 最终审批
 
 展示接口、表、未闭环问题和三个主要文档，等待用户明确批准。批准后执行：
@@ -212,5 +217,6 @@ python .codex/skills/tapd-code-source-review/scripts/approve_testcase_review.py 
 - 接口方法、完整路由、DTO、调用链和表均有源码或元数据证据。
 - 每条测试用例均有需求实现结论；非完整实现项均已触发 Halt 并绑定用户处理决定。
 - `table_information.md` 只包含指定平台元数据唯一命中的表；未命中表进入 `unresolved_tables.md`。
+- 三大定制文档的首个 Markdown 表严格符合共享输出契约，并已通过发布校验与最终审批复核。
 - `review_validation.json` 与 `evidence_index.json` 中的哈希全部匹配。
 - 用户最终批准后才生成 `testcase_confirmation.json` 和知识索引记录。

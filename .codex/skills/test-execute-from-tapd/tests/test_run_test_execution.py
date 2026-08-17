@@ -22,8 +22,10 @@ class LocalHttpHandler(BaseHTTPRequestHandler):
     resources: set[str] = set()
     events: list[str] = []
     auth_headers: list[str | None] = []
+    content_types: list[str | None] = []
 
     def read_json_body(self) -> dict[str, object]:
+        self.content_types.append(self.headers.get("Content-Type"))
         content_length: int = int(self.headers.get("Content-Length", "0"))
         value: object = json.loads(self.rfile.read(content_length).decode("utf-8"))
         if not isinstance(value, dict):
@@ -56,6 +58,10 @@ class LocalHttpHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         body: dict[str, object] = self.read_json_body()
         resource_name: str = str(body["name"])
+        if self.path == "/setup-failure":
+            self.events.append(f"setup_failed:{resource_name}")
+            self.send_json(422, b'{"code":1}')
+            return
         self.resources.add(resource_name)
         self.events.append(f"setup:{resource_name}")
         self.send_json(200, b'{"code":0}')
@@ -258,6 +264,7 @@ class RunnerSmokeTest(unittest.TestCase):
         LocalHttpHandler.resources = set()
         LocalHttpHandler.events = []
         LocalHttpHandler.auth_headers = []
+        LocalHttpHandler.content_types = []
         self.server: ThreadingHTTPServer = ThreadingHTTPServer(("127.0.0.1", 0), LocalHttpHandler)
         self.thread: threading.Thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -467,10 +474,16 @@ class RunnerSmokeTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(LocalHttpHandler.events, ["setup:TEST_REQ_RESOURCE", "cleanup:TEST_REQ_RESOURCE"])
+            self.assertEqual(LocalHttpHandler.content_types, ["application/json", "application/json"])
             self.assertNotIn("TEST_REQ_RESOURCE", LocalHttpHandler.resources)
             manifest: str = (root / "output" / "test_data_manifest.md").read_text(encoding="utf-8")
             self.assertIn('"_lifecycle":"created"', manifest)
             self.assertIn('"_lifecycle":"cleaned"', manifest)
+            report: str = (root / "output" / "interface_test_execution_report.md").read_text(encoding="utf-8")
+            self.assertIn("## Data lifecycle actions", report)
+            self.assertIn("| setup | create_resource | resource_fixture | http | PASS | 200 | 0 | 0 |", report)
+            self.assertIn("| cleanup | delete_resource | resource_fixture | http | PASS | 200 | 0 | 0 |", report)
+            self.assertIn("### cleanup: delete_resource", report)
 
     def test_cleanup_runs_after_test_assertion_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -488,6 +501,35 @@ class RunnerSmokeTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(LocalHttpHandler.events[-1], "cleanup:TEST_REQ_RESOURCE")
             self.assertNotIn("TEST_REQ_RESOURCE", LocalHttpHandler.resources)
+
+    def test_setup_failure_still_writes_lifecycle_report_and_runs_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root: Path = Path(temporary_directory)
+            domain: str = f"http://127.0.0.1:{self.server.server_port}"
+            assessment: dict[str, object] = with_api_data_lifecycle(assessment_payload("/ok"), "/cleanup")
+            data_preparation: object = assessment.get("data_preparation")
+            if not isinstance(data_preparation, dict):
+                raise TypeError("Expected data preparation object.")
+            entries: object = data_preparation.get("entries")
+            if not isinstance(entries, list) or not entries or not isinstance(entries[0], dict):
+                raise TypeError("Expected one data preparation entry.")
+            setup: object = entries[0].get("setup")
+            if not isinstance(setup, dict):
+                raise TypeError("Expected setup action.")
+            setup["path"] = "/setup-failure"
+            write_json(root / "preparation_assessment.json", assessment)
+            built: subprocess.CompletedProcess[str] = run_builder(root)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            write_json(root / "confirmation.json", {"approved": True, "testcase_hash": "approved-hash", "code_review_run_id": "review-1"})
+            write_json(root / "environments_config.json", {"environments": [{"name": "local", "api_domain": domain, "environment_type": "test", "allow_test_data_mutation": True}]})
+
+            result: subprocess.CompletedProcess[str] = run_runner(root, "local", "0")
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(LocalHttpHandler.events, ["setup_failed:TEST_REQ_RESOURCE", "cleanup:TEST_REQ_RESOURCE"])
+            report: str = (root / "output" / "interface_test_execution_report.md").read_text(encoding="utf-8")
+            self.assertIn("| setup | create_resource | resource_fixture | http | FAIL | 422 | 0 | 1 |", report)
+            self.assertIn("| cleanup | delete_resource | resource_fixture | http | PASS | 200 | 0 | 0 |", report)
 
     def test_rejects_mutation_disabled_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -545,6 +587,9 @@ class RunnerSmokeTest(unittest.TestCase):
             self.assertIn("TEST_REQ_RESOURCE", LocalHttpHandler.resources)
             manifest: str = (root / "output" / "test_data_manifest.md").read_text(encoding="utf-8")
             self.assertIn('"_lifecycle":"residual"', manifest)
+            report: str = (root / "output" / "interface_test_execution_report.md").read_text(encoding="utf-8")
+            self.assertIn("| cleanup | delete_resource | resource_fixture | http | FAIL | 409 | 0 | 1 |", report)
+            self.assertIn('"actual_business_code": 1', report)
 
     def test_rejects_database_write_sql(self) -> None:
         runner: ModuleType = load_runner_module()

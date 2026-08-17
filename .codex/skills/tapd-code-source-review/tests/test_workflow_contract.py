@@ -21,14 +21,57 @@ from scripts.analyze_testcase_evidence import (
     select_business_entries,
     unresolved_tables,
 )
-from scripts.prepare_review_run import parse_gateway_prefix_candidates, validate_gateway_evidence
+from scripts.prepare_review_run import parse_gateway_prefix_candidates, validate_gateway_evidence, validate_source_scopes
 from scripts.workflow_contract import validate_gateway_evidence_integrity
 from scripts.workflow_contract import (
+    CORE_PROCESS_INTERFACE_HEADERS,
+    TABLE_INFORMATION_HEADERS,
+    UNIT_TEST_INTERFACE_HEADERS,
+    markdown_table_lines,
     parse_code_url,
     sha256_file,
     validate_approved_source_run,
+    validate_review_document_schemas,
     write_json,
 )
+
+
+def test_review_document_schemas_accept_canonical_first_tables(tmp_path: Path) -> None:
+    documents = {
+        "unit_test_interfaces.md": UNIT_TEST_INTERFACE_HEADERS,
+        "core_process_interfaces.md": CORE_PROCESS_INTERFACE_HEADERS,
+        "table_information.md": TABLE_INFORMATION_HEADERS,
+    }
+    for filename, headers in documents.items():
+        header, separator = markdown_table_lines(headers)
+        (tmp_path / filename).write_text(
+            f"# Evidence\n\n{header}\n{separator}\n",
+            encoding="utf-8",
+        )
+
+    validate_review_document_schemas(tmp_path)
+
+
+def test_review_document_schemas_reject_legacy_table(tmp_path: Path) -> None:
+    documents = {
+        "unit_test_interfaces.md": UNIT_TEST_INTERFACE_HEADERS,
+        "core_process_interfaces.md": CORE_PROCESS_INTERFACE_HEADERS,
+        "table_information.md": TABLE_INFORMATION_HEADERS,
+    }
+    for filename, headers in documents.items():
+        header, separator = markdown_table_lines(headers)
+        (tmp_path / filename).write_text(
+            f"# Evidence\n\n{header}\n{separator}\n",
+            encoding="utf-8",
+        )
+    (tmp_path / "unit_test_interfaces.md").write_text(
+        "# Legacy\n\n| HTTP | 完整路由 | 参数 | 用途 | 源码证据 |\n"
+        "|---|---|---|---|---|\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unit_test_interfaces.md"):
+        validate_review_document_schemas(tmp_path)
 
 
 def test_parse_code_url_requires_explicit_git_branch() -> None:
@@ -114,6 +157,22 @@ def test_source_gate_rejects_failed_service(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="not fetched successfully"):
         validate_approved_source_run(run_dir)
+
+
+def test_source_scope_is_repository_relative_and_existing(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    module = repository / "module-a"
+    module.mkdir(parents=True)
+    sources = [{"service_id": "service_001", "cache_path": str(repository)}]
+
+    assert validate_source_scopes(sources, {"service_001": "module-a"}) == {
+        "service_001": "module-a"
+    }
+    assert validate_source_scopes(sources, {}) == {"service_001": ""}
+    with pytest.raises(ValueError, match="repository-relative"):
+        validate_source_scopes(sources, {"service_001": "../outside"})
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        validate_source_scopes(sources, {"service_001": "missing"})
 
 
 def test_gateway_prefix_and_table_resolution_are_isolated() -> None:
@@ -250,6 +309,8 @@ def test_business_tokens_select_entries_when_cases_have_no_routes() -> None:
         "short_token_weight": 2,
         "long_token_weight": 3,
         "chinese_token_weight": 6,
+        "action_only_alias_keys": ["save", "update"],
+        "unmatched_identifier_penalty": 15,
         "identifier_aliases": {},
     }
 
@@ -289,6 +350,8 @@ def test_identifier_aliases_map_changed_purchase_routes_to_chinese_cases() -> No
         "short_token_weight": 2,
         "long_token_weight": 3,
         "chinese_token_weight": 6,
+        "action_only_alias_keys": ["save", "update"],
+        "unmatched_identifier_penalty": 15,
         "identifier_aliases": {
             "cart": ["购物车"],
             "confirm": ["结算"],
@@ -304,6 +367,35 @@ def test_identifier_aliases_map_changed_purchase_routes_to_chinese_cases() -> No
     mapped = map_cases_to_entries(entries, cases, policy)
 
     assert {entry["route"] for entry in mapped} == {entry["route"] for entry in entries}
+
+
+def test_action_only_alias_does_not_map_unrelated_save_entry() -> None:
+    entries = [
+        {"route": "/warehouse", "tokens": ["warehouse", "save", "保存"], "identifier_tokens": ["warehouse", "save"]},
+        {"route": "/spu", "tokens": ["sku", "save", "保存"], "identifier_tokens": ["sku", "save"]},
+        {"route": "/spu_price_log", "tokens": ["sku", "save", "保存"], "identifier_tokens": ["sku", "price", "log", "save"]},
+    ]
+    cases = [{"case_id": "TC001", "routes": [], "tokens": ["sku", "保存"]}]
+    policy = {
+        "minimum_score": 2,
+        "max_inferred_cases_per_entry": 5,
+        "max_inferred_entries_per_case": 3,
+        "minimum_token_document_frequency": 1,
+        "maximum_token_document_frequency_ratio": 1.0,
+        "minimum_scored_token_length": 3,
+        "minimum_chinese_scored_token_length": 2,
+        "long_token_length": 5,
+        "short_token_weight": 2,
+        "long_token_weight": 3,
+        "chinese_token_weight": 6,
+        "action_only_alias_keys": ["save", "update"],
+        "unmatched_identifier_penalty": 15,
+        "identifier_aliases": {"save": ["保存"], "update": ["更新", "保存"]},
+    }
+
+    mapped = map_cases_to_entries(entries, cases, policy)
+
+    assert [entry["route"] for entry in mapped] == ["/spu"]
 
 
 def test_route_free_cases_keep_all_source_entries(tmp_path: Path) -> None:
