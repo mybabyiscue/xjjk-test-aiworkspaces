@@ -2,6 +2,8 @@
 config/credentials.local.json
 config/environments_config.json
 config/connections.json
+config/.git-credentials
+*.credentials
 .env
 .env.*
 !.env.example

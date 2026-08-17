@@ -104,6 +104,7 @@ public class ActivityController {
         "--questions", str(questions),
         "--metadata-document", str(metadata),
         "--platform", "service_001=Test Platform",
+        "--source-scope", "service_001=src",
         "--gateway-prefix", "service_001=/product",
         "--gateway-evidence", f"service_001={gateway}:1",
         "--questions-decision", "resolved",
@@ -148,6 +149,21 @@ public class ActivityController {
             "--output-root", str(review_root),
         )
     review_manifest_path.write_text(valid_review_manifest, encoding="utf-8", newline="\n")
+    unit_interfaces_path = review_run / "unit_test_interfaces.md"
+    valid_unit_interfaces = unit_interfaces_path.read_text(encoding="utf-8")
+    unit_interfaces_path.write_text(
+        "# Legacy\n\n| HTTP | 完整路由 | 参数 | 用途 | 源码证据 |\n"
+        "|---|---|---|---|---|\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(subprocess.CalledProcessError):
+        run_script(
+            "validate_publish_review.py",
+            "--run-dir", str(review_run),
+            "--test-cases", str(test_cases),
+            "--output-root", str(review_root),
+        )
+    unit_interfaces_path.write_text(valid_unit_interfaces, encoding="utf-8", newline="\n")
     run_script(
         "validate_publish_review.py",
         "--run-dir", str(review_run),

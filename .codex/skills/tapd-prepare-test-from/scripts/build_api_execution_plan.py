@@ -52,6 +52,19 @@ def parameter_is_unresolved(value: object) -> bool:
     return isinstance(source_kind, str) and source_kind in BLOCKING_SOURCE_KINDS
 
 
+def normalize_data_action_for_execution(action: dict[str, object]) -> dict[str, object]:
+    normalized: dict[str, object] = deepcopy(action)
+    raw_reference: object = normalized.get("evidence_reference")
+    if isinstance(raw_reference, dict):
+        source_file: str = require_string(raw_reference.get("source_file"), "data_action.evidence_reference.source_file")
+        source_location: str = require_string(raw_reference.get("source_location"), "data_action.evidence_reference.source_location")
+        normalized["evidence_reference"] = f"{source_file}#{source_location}"
+    auth_header_name: object = normalized.get("auth_header_name")
+    if isinstance(auth_header_name, str):
+        normalized["authorization_header"] = auth_header_name
+    return normalized
+
+
 def require_variant_type(value: object, field_name: str) -> str:
     normalized_value: str = require_string(value, field_name)
     if normalized_value not in VALID_VARIANT_TYPES:
@@ -220,12 +233,16 @@ def build_execution_plan(
         entry: dict[str, object] = require_object(raw_entry, f"data_preparation.entries[{entry_index}]")
         entry_id: str = require_string(entry.get("id"), f"data_preparation.entries[{entry_index}].id")
         strategy: str = require_string(entry.get("strategy"), f"{entry_id}.strategy")
-        if strategy not in {"reuse", "api_create", "sql_insert", "manual_create"}:
+        if strategy not in {"reuse", "api_create", "api_snapshot_restore", "sql_insert", "manual_create"}:
             blockers.append(f"{entry_id} 使用了不允许的数据策略；禁止 Mock、Fake、Stub 和 Mock seed。")
             continue
-        if strategy in {"api_create", "sql_insert"}:
-            setup: dict[str, object] = deepcopy(require_object(entry.get("setup"), f"{entry_id}.setup"))
-            cleanup: dict[str, object] = deepcopy(require_object(entry.get("cleanup"), f"{entry_id}.cleanup"))
+        if strategy in {"api_create", "api_snapshot_restore", "sql_insert"}:
+            setup: dict[str, object] = normalize_data_action_for_execution(
+                require_object(entry.get("setup"), f"{entry_id}.setup")
+            )
+            cleanup: dict[str, object] = normalize_data_action_for_execution(
+                require_object(entry.get("cleanup"), f"{entry_id}.cleanup")
+            )
             setup["entry_id"] = entry_id
             cleanup["entry_id"] = entry_id
             data_setup.append(setup)

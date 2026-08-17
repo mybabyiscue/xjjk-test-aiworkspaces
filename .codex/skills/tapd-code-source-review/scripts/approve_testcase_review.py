@@ -12,6 +12,7 @@ from workflow_contract import (
     review_input_path,
     sha256_file,
     validate_prepared_review_gate,
+    validate_review_document_schemas,
     write_json,
 )
 
@@ -50,6 +51,7 @@ def main() -> int:
     testcase_hash = sha256_file(test_cases_path)
     if validation.get("testcase_hash") != testcase_hash:
         raise ValueError("test_cases.md changed after review validation")
+    validate_review_document_schemas(run_dir)
     expected_artifacts = validation.get("artifacts")
     if not isinstance(expected_artifacts, dict):
         raise TypeError("review_validation.json.artifacts must be an object")
@@ -60,6 +62,7 @@ def main() -> int:
     latest_context = read_json_object(latest_context_path, "published review context")
     if latest_context.get("review_run_id") != run_dir.name:
         raise ValueError("The approved review run is not the published latest run")
+    validate_review_document_schemas(latest_dir)
     if artifact_hashes(latest_dir) != expected_artifacts:
         raise ValueError("Published latest artifacts do not match the validated review run")
     if not args.approval_note.strip():

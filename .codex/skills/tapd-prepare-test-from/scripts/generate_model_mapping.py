@@ -115,6 +115,41 @@ def extract_case_ids(raw_case_ids: object) -> list[str]:
     return result
 
 
+def expand_reviewed_case_expression(value: str) -> list[str]:
+    result: list[str] = []
+    for segment in re.split(r"[,，]", value):
+        case_ids: list[str] = re.findall(r"TC\d+|TC-[A-Za-z0-9]+", segment, flags=re.IGNORECASE)
+        if len(case_ids) == 2 and re.search(r"[-–—~至]", segment):
+            start_match: re.Match[str] | None = re.fullmatch(r"TC(\d+)", case_ids[0], flags=re.IGNORECASE)
+            end_match: re.Match[str] | None = re.fullmatch(r"TC(\d+)", case_ids[1], flags=re.IGNORECASE)
+            if start_match and end_match:
+                start_number: int = int(start_match.group(1))
+                end_number: int = int(end_match.group(1))
+                width: int = max(len(start_match.group(1)), len(end_match.group(1)))
+                if start_number <= end_number:
+                    result.extend(f"TC{number:0{width}d}" for number in range(start_number, end_number + 1))
+                    continue
+        result.extend(case_id.upper() for case_id in case_ids)
+    return list(dict.fromkeys(result))
+
+
+def reviewed_core_case_ids(raw_interface: JsonObject, core_content: str) -> list[str]:
+    http_method: object = raw_interface.get("http_method")
+    route: object = raw_interface.get("route")
+    if not isinstance(http_method, str) or not isinstance(route, str):
+        return []
+    signature: str = f"{http_method.strip()} {route.strip()}"
+    result: list[str] = []
+    for line in core_content.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells: list[str] = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or cells[2] != signature:
+            continue
+        result.extend(expand_reviewed_case_expression(cells[0]))
+    return list(dict.fromkeys(result))
+
+
 def evidence_anchor(prefix: str, value: str) -> str:
     return stable_reference(prefix, value)
 
@@ -178,12 +213,14 @@ def build_parameter(
     table_lookup: dict[str, JsonObject],
     selected_query_reference: str,
     table_path: Path,
-    interface_path: Path,
+    core_path: Path,
     source_anchor: str,
     missing_items: list[JsonObject],
 ) -> list[JsonObject]:
     parameter_name: str = require_text_field(raw_param.get("name"), "params.name", missing_items)
     parameter_type: str = require_text_field(raw_param.get("type"), "params.type", missing_items)
+    if any(protocol_type in parameter_type for protocol_type in ("HttpServletResponse", "HttpServletRequest")):
+        return []
     raw_fields: object = raw_param.get("fields")
     location: str = "body"
     if parameter_name and "{" in parameter_name:
@@ -192,11 +229,27 @@ def build_parameter(
         location = "query"
     expanded_fields: list[JsonObject] = []
     if isinstance(raw_fields, list) and raw_fields:
-        for raw_field in raw_fields:
+        pending_fields: list[tuple[str, JsonObject]] = []
+
+        def collect_leaf_fields(parent_name: str, fields: list[object]) -> None:
+            for raw_field in fields:
+                if not isinstance(raw_field, dict):
+                    continue
+                field_name_value: object = raw_field.get("name")
+                field_name: str = field_name_value.strip() if isinstance(field_name_value, str) else ""
+                nested_fields: object = raw_field.get("fields")
+                qualified_field_name: str = f"{parent_name}.{field_name}" if field_name else parent_name
+                if isinstance(nested_fields, list) and nested_fields:
+                    collect_leaf_fields(qualified_field_name, nested_fields)
+                    continue
+                pending_fields.append((parent_name, raw_field))
+
+        collect_leaf_fields(parameter_name, raw_fields)
+        for field_parent_name, raw_field in pending_fields:
             if not isinstance(raw_field, dict):
                 continue
-            field_name: str = require_text_field(raw_field.get("name"), f"{parameter_name}.field.name", missing_items)
-            field_type: str = require_text_field(raw_field.get("type"), f"{parameter_name}.field.type", missing_items)
+            field_name: str = require_text_field(raw_field.get("name"), f"{field_parent_name}.field.name", missing_items)
+            field_type: str = require_text_field(raw_field.get("type"), f"{field_parent_name}.field.type", missing_items)
             field_required: object = raw_field.get("required")
             field_required_text: object = field_required if isinstance(field_required, bool) else None
             normalized_name: str = normalize_name(field_name)
@@ -225,14 +278,22 @@ def build_parameter(
                 query_reference = ""
                 value_status = "resolved"
                 missing_reason = ""
+            elif field_required is False:
+                continue
             else:
                 source_kind = "manual_preparation"
                 source_reference = f"manual:{field_name}"
                 query_reference = ""
                 value_status = "missing"
                 missing_reason = "No evidence-backed database field or environment source was found."
+                missing_items.append(
+                    {
+                        "field": f"{parameter_name}.{field_name}",
+                        "reason": missing_reason,
+                    }
+                )
             parameter: JsonObject = {
-                "name": f"{parameter_name}.{field_name}",
+                "name": f"{field_parent_name}.{field_name}",
                 "location": location,
                 "type": field_type,
                 "source": {
@@ -245,11 +306,11 @@ def build_parameter(
                 "query_reference": query_reference,
                 "evidence_references": [
                     evidence_reference(
-                        "unit_test_interfaces.md",
-                        interface_path,
+                        "core_process_interfaces.md",
+                        core_path,
                         "field",
                         source_anchor,
-                        "Interface parameter structure is taken from the reviewed unit-test interface evidence.",
+                        "Interface parameter structure is anchored to the reviewed core-process interface row.",
                     )
                 ],
             }
@@ -263,6 +324,8 @@ def build_parameter(
             expanded_fields.append(parameter)
     if expanded_fields:
         return expanded_fields
+    if isinstance(raw_fields, list) and raw_fields:
+        return []
     normalized_name = normalize_name(parameter_name)
     lookup = table_lookup.get(normalized_name)
     if isinstance(lookup, dict):
@@ -301,12 +364,14 @@ def build_parameter(
         query_reference = ""
         value_status = "missing"
         missing_reason = "No evidence-backed database row exists yet; manual preparation is required."
+        missing_items.append({"field": parameter_name, "reason": missing_reason})
     else:
         source_kind = "manual_preparation"
         source_reference = f"manual:{parameter_name}"
         query_reference = ""
         value_status = "missing"
         missing_reason = "No evidence-backed source was found for this parameter."
+        missing_items.append({"field": parameter_name, "reason": missing_reason})
     return [{
         "name": parameter_name,
         "location": location,
@@ -321,11 +386,11 @@ def build_parameter(
         "query_reference": query_reference,
         "evidence_references": [
             evidence_reference(
-                "unit_test_interfaces.md",
-                interface_path,
+                "core_process_interfaces.md",
+                core_path,
                 "field",
                 source_anchor,
-                "Interface parameter structure is taken from the reviewed unit-test interface evidence.",
+                "Interface parameter structure is anchored to the reviewed core-process interface row.",
             )
         ],
     }]
@@ -344,6 +409,48 @@ def build_response_assertion(core_path: Path, source_anchor: str) -> JsonObject:
             "Response assertion is anchored to reviewed interface evidence.",
         ),
     }
+
+
+def reviewed_core_anchor(raw_interface: JsonObject, core_content: str) -> str:
+    http_method: object = raw_interface.get("http_method")
+    route: object = raw_interface.get("route")
+    if not isinstance(http_method, str) or not http_method.strip():
+        return ""
+    if not isinstance(route, str) or not route.strip():
+        return ""
+    anchor: str = f"{http_method.strip()} {route.strip()}"
+    return anchor if anchor in core_content else ""
+
+
+def reviewed_interface_references(
+    unit_path: Path,
+    core_path: Path,
+    source_anchor: str,
+    core_anchor: str,
+    rule_type: str,
+) -> list[JsonObject]:
+    references: list[JsonObject] = []
+    unit_content: str = unit_path.read_text(encoding="utf-8-sig")
+    if source_anchor in unit_content:
+        references.append(
+            evidence_reference(
+                "unit_test_interfaces.md",
+                unit_path,
+                rule_type,
+                source_anchor,
+                "The reviewed unit-test evidence contains the operation anchor.",
+            )
+        )
+    references.append(
+        evidence_reference(
+            "core_process_interfaces.md",
+            core_path,
+            rule_type,
+            core_anchor,
+            "The reviewed core-process evidence contains the executable HTTP method and path.",
+        )
+    )
+    return references
 
 
 def build_interface_case(
@@ -365,6 +472,7 @@ def build_interface_case(
     interface_key: str = stable_reference("IFC", f"{service_id}:{class_name}#{method_name}:{route}")
     source_anchor: str = f"{class_name}#{method_name}"
     route_signature: str = f"{class_name}#{method_name}"
+    core_anchor: str = f"{http_method} {route}"
     query_reference: str = "missing"
     params: list[JsonObject] = []
     raw_params: object = raw_interface.get("params")
@@ -379,57 +487,43 @@ def build_interface_case(
                     table_lookup,
                     query_reference,
                     table_path,
-                    interface_path,
-                    source_anchor,
+                    core_path,
+                    core_anchor,
                     missing_items,
                 )
             )
     case_keys: list[str] = [stable_case_key(case_id) for case_id in selected_case_ids]
-    selected_case: JsonObject = case_lookup[selected_case_ids[0]] if selected_case_ids else {}
-    case_title: str = selected_case["title"] if selected_case_ids else route_signature
-    variant_decision: JsonObject = infer_variant_type(selected_case) if selected_case_ids else {
-        "variant_type": DEFAULT_VARIANT_TYPE,
-        "decision_mode": "default_positive",
-        "matched_signals": [],
-    }
-    scenario_category: str = str(selected_case.get("case_type", "")) if selected_case_ids else ""
-    scenario_tags: list[str] = build_scenario_tags(selected_case, missing_items) if selected_case_ids else []
-    request_variant: JsonObject = {
-        "name": case_title,
-        "variant_type": variant_decision["variant_type"],
-        "variant_type_decision": variant_decision,
-        "scenario_category": scenario_category,
-        "scenario_tags": scenario_tags,
-        "evidence_references": [
-            evidence_reference(
-                "unit_test_interfaces.md",
-                interface_path,
-                "method",
-                source_anchor,
-                "Interface method and request shape are derived from reviewed unit-test evidence.",
-            ),
-            evidence_reference(
-                "core_process_interfaces.md",
-                core_path,
-                "method",
-                route_signature,
-                "Core process interface evidence anchors the same operation for execution review.",
-            ),
-        ],
-        "case_keys": case_keys,
-        "headers": {},
-        "auth_header_name": "authorization",
-        "query": {},
-        "parameters": params,
-        "expected": {
-            "response_assertions": [build_response_assertion(core_path, source_anchor)],
-            "database_assertions": [],
-        },
-        "setup_steps": [],
-        "cleanup_steps": [],
-    }
-    if query_reference != "missing":
-        request_variant["parameters"] = params
+    request_variants: list[JsonObject] = []
+    for case_id in selected_case_ids:
+        selected_case: JsonObject = case_lookup[case_id]
+        variant_decision: JsonObject = infer_variant_type(selected_case)
+        request_variants.append(
+            {
+                "name": selected_case["title"],
+                "variant_type": variant_decision["variant_type"],
+                "variant_type_decision": variant_decision,
+                "scenario_category": str(selected_case.get("case_type", "")),
+                "scenario_tags": build_scenario_tags(selected_case, missing_items),
+                "evidence_references": reviewed_interface_references(
+                    interface_path,
+                    core_path,
+                    source_anchor,
+                    core_anchor,
+                    "method",
+                ),
+                "case_keys": [stable_case_key(case_id)],
+                "headers": {},
+                "auth_header_name": "authorization",
+                "query": {},
+                "parameters": params,
+                "expected": {
+                    "response_assertions": [build_response_assertion(core_path, core_anchor)],
+                    "database_assertions": [],
+                },
+                "setup_steps": [],
+                "cleanup_steps": [],
+            }
+        )
     return {
         "interface_key": interface_key,
         "interface_evidence": {
@@ -439,32 +533,23 @@ def build_interface_case(
             "method": http_method,
             "path": route,
             "response_type": return_type,
-            "evidence_references": [
-                evidence_reference(
-                    "unit_test_interfaces.md",
-                    interface_path,
-                    "method",
-                    source_anchor,
-                    "The reviewed unit-test evidence is the source for the interface contract.",
-                ),
-                evidence_reference(
-                    "core_process_interfaces.md",
-                    core_path,
-                    "method",
-                    route_signature,
-                    "The reviewed core-process evidence provides the executable route anchor.",
-                ),
-            ],
+            "evidence_references": reviewed_interface_references(
+                interface_path,
+                core_path,
+                source_anchor,
+                core_anchor,
+                "method",
+            ),
         },
         "covered_case_keys": case_keys,
-        "request_variants": [request_variant],
+        "request_variants": request_variants,
         "negative_variant_policy": "no_verifiable_validation_rule",
         "negative_variant_evidence": [
             evidence_reference(
                 "core_process_interfaces.md",
                 core_path,
                 "assertion",
-                route_signature,
+                core_anchor,
                 "The current evidence does not expose a stable negative variant rule.",
             )
         ],
@@ -478,13 +563,20 @@ def build_interface_case(
     }
 
 
-def build_non_interface_case(case_id: str, case_lookup: dict[str, JsonObject], interface_path: Path, core_path: Path) -> JsonObject:
+def build_non_interface_case(
+    case_id: str,
+    case_lookup: dict[str, JsonObject],
+    interface_path: Path,
+    core_path: Path,
+    classification: str = "blocked",
+    reason: str = "No interface evidence can claim this approved case without inventing unsupported mappings.",
+) -> JsonObject:
     case: JsonObject = case_lookup[case_id]
     return {
         "case_key": stable_case_key(case_id),
         "title": case["title"],
-        "classification": "blocked",
-        "reason": "No interface evidence can claim this approved case without inventing unsupported mappings.",
+        "classification": classification,
+        "reason": reason,
         "related_interfaces": [],
         "parameter_data": [],
         "recommended_test_type": str(case.get("case_type", "evidence_based")),
@@ -507,7 +599,7 @@ def build_non_interface_case(case_id: str, case_lookup: dict[str, JsonObject], i
         "audit": {
             "status": "阻断",
             "evidence_status": "missing",
-            "reason": "Blocked because a stable interface mapping is not present in the reviewed evidence.",
+            "reason": reason,
             "reviewer": "Codex",
             "reviewed_at": "2026-08-11T00:00:00+08:00",
         },
@@ -539,12 +631,35 @@ def build_model_mapping(
     assigned_case_ids: set[str] = set()
     interface_cases: list[JsonObject] = []
     missing_items: list[JsonObject] = []
-    for raw_interface in raw_interfaces:
+    core_content: str = core_path.read_text(encoding="utf-8-sig")
+    method_priority: dict[str, int] = {"PUT": 0, "PATCH": 1, "POST": 2, "GET": 3, "DELETE": 4}
+    ordered_interfaces: list[object] = sorted(
+        raw_interfaces,
+        key=lambda value: method_priority.get(str(value.get("http_method")), 99) if isinstance(value, dict) else 99,
+    )
+    manual_case_ids: set[str] = set()
+    for raw_interface in ordered_interfaces:
         if not isinstance(raw_interface, dict):
             continue
-        raw_case_ids: list[str] = extract_case_ids(raw_interface.get("case_ids"))
-        selected_case_ids: list[str] = [case_id for case_id in raw_case_ids if case_id in case_lookup and case_id not in assigned_case_ids]
+        if not reviewed_core_anchor(raw_interface, core_content):
+            continue
+        reviewed_case_ids: list[str] = reviewed_core_case_ids(raw_interface, core_content)
+        selected_case_ids: list[str] = [
+            case_id
+            for case_id in reviewed_case_ids
+            if case_id in case_lookup and case_id not in assigned_case_ids
+        ]
         if not selected_case_ids:
+            continue
+        raw_params: object = raw_interface.get("params")
+        parameter_types: list[str] = [
+            str(param.get("type", ""))
+            for param in raw_params
+            if isinstance(param, dict)
+        ] if isinstance(raw_params, list) else []
+        if any("MultipartFile" in parameter_type or "HttpServletResponse" in parameter_type for parameter_type in parameter_types):
+            manual_case_ids.update(selected_case_ids)
+            assigned_case_ids.update(selected_case_ids)
             continue
         assigned_case_ids.update(selected_case_ids)
         interface_cases.append(
@@ -561,7 +676,18 @@ def build_model_mapping(
         )
     non_interface_cases: list[JsonObject] = []
     for case_id in case_lookup:
-        if case_id not in assigned_case_ids:
+        if case_id in manual_case_ids:
+            non_interface_cases.append(
+                build_non_interface_case(
+                    case_id,
+                    case_lookup,
+                    unit_path,
+                    core_path,
+                    "manual_only",
+                    "The reviewed route requires multipart upload or binary file-content validation, which the JSON HTTP executor does not implement.",
+                )
+            )
+        elif case_id not in assigned_case_ids:
             non_interface_cases.append(build_non_interface_case(case_id, case_lookup, unit_path, core_path))
     core_flows: list[JsonObject] = []
     core_blocker_reason: str = "No stable multi-step core flow could be assembled from the reviewed call-chain evidence."
@@ -569,7 +695,7 @@ def build_model_mapping(
     generation_status: str = "ready"
     if missing_items:
         generation_status = "blocked"
-    if non_interface_cases:
+    if any(case.get("classification") == "blocked" for case in non_interface_cases):
         generation_status = "blocked"
     if not interface_cases:
         generation_status = "blocked"

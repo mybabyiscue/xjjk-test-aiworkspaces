@@ -439,7 +439,7 @@ def validate_questions(markdown: str) -> None:
             rows.append(cells)
     if not rows:
         raise ValueError("questions.md 必须包含问题行或‘无待确认问题’行。")
-    no_question_rows: list[list[str]] = [row for row in rows if row[2] == "无待确认问题"]
+    no_question_rows: list[list[str]] = [row for row in rows if row[3] == "无待确认问题"]
     if no_question_rows:
         if len(rows) != 1 or no_question_rows[0][0] != "无":
             raise ValueError("‘无待确认问题’行不能与实际问题混用。")

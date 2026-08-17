@@ -560,6 +560,158 @@ class EvidenceGenerationTests(unittest.TestCase):
             )
             self.assertEqual(plan["requests"][0]["expected"]["http_status"], 200)
 
+    def test_model_mapping_ignores_interface_missing_from_reviewed_core_table(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root: Path = Path(raw_directory)
+            evidence_index_path, tapd_cases_path, unit_path, core_path, table_path = self.write_generation_fixture(
+                root,
+                [{"name": "resource_id", "data_type": "bigint"}],
+            )
+            raw_interface_path: Path = evidence_index_path.parent / "raw" / "testcase_interface_evidence.json"
+            payload: dict[str, object] = json.loads(raw_interface_path.read_text(encoding="utf-8"))
+            reviewed_interface: dict[str, object] = payload["interfaces"][0]
+            payload["interfaces"] = [
+                {
+                    **reviewed_interface,
+                    "http_method": "PUT",
+                    "route": "/generic/unreviewed",
+                    "method_name": "unreviewed",
+                },
+                reviewed_interface,
+            ]
+            write_json(raw_interface_path, payload)
+            evidence_index: dict[str, object] = json.loads(evidence_index_path.read_text(encoding="utf-8"))
+            evidence_index["artifacts"]["raw/testcase_interface_evidence.json"] = file_sha256(raw_interface_path)
+            write_json(evidence_index_path, evidence_index)
+
+            model_mapping: dict[str, object] = build_model_mapping(
+                evidence_index_path,
+                tapd_cases_path,
+                unit_path,
+                core_path,
+                table_path,
+                SKILL_PATH,
+            )
+
+            self.assertEqual(model_mapping["generation_report"]["status"], "ready")
+            self.assertEqual(len(model_mapping["interface_cases"]), 1)
+            interface_evidence: dict[str, object] = model_mapping["interface_cases"][0]["interface_evidence"]
+            self.assertEqual(interface_evidence["method"], "GET")
+            self.assertEqual(interface_evidence["path"], "/generic/resource")
+            for reference in interface_evidence["evidence_references"]:
+                source_path: Path = evidence_index_path.parent / reference["source_file"]
+                self.assertIn(reference["source_location"], source_path.read_text(encoding="utf-8-sig"))
+
+    def test_model_mapping_blocks_when_parameter_source_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root: Path = Path(raw_directory)
+            evidence_index_path, tapd_cases_path, unit_path, core_path, table_path = self.write_generation_fixture(
+                root,
+                [{"name": "resource_id", "data_type": "bigint"}],
+            )
+            raw_interface_path: Path = evidence_index_path.parent / "raw" / "testcase_interface_evidence.json"
+            payload: dict[str, object] = json.loads(raw_interface_path.read_text(encoding="utf-8"))
+            payload["interfaces"][0]["params"] = [{"name": "unresolvedPayload", "type": "UnknownDTO", "fields": []}]
+            write_json(raw_interface_path, payload)
+            evidence_index: dict[str, object] = json.loads(evidence_index_path.read_text(encoding="utf-8"))
+            evidence_index["artifacts"]["raw/testcase_interface_evidence.json"] = file_sha256(raw_interface_path)
+            write_json(evidence_index_path, evidence_index)
+
+            model_mapping: dict[str, object] = build_model_mapping(
+                evidence_index_path,
+                tapd_cases_path,
+                unit_path,
+                core_path,
+                table_path,
+                SKILL_PATH,
+            )
+
+            self.assertEqual(model_mapping["generation_report"]["status"], "blocked")
+            self.assertEqual(model_mapping["generation_report"]["missing_items"][0]["field"], "unresolvedPayload")
+
+    def test_model_mapping_expands_nested_dto_leaves_and_keeps_one_variant_per_case(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root: Path = Path(raw_directory)
+            evidence_index_path, tapd_cases_path, unit_path, core_path, table_path = self.write_generation_fixture(
+                root,
+                [{"name": "resource_id", "data_type": "bigint"}, {"name": "weight", "data_type": "decimal"}],
+            )
+            raw_interface_path: Path = evidence_index_path.parent / "raw" / "testcase_interface_evidence.json"
+            payload: dict[str, object] = json.loads(raw_interface_path.read_text(encoding="utf-8"))
+            payload["interfaces"][0]["params"] = [
+                {
+                    "name": "payload",
+                    "type": "ResourceDTO",
+                    "fields": [
+                        {"name": "resourceId", "type": "Long"},
+                        {"name": "items", "type": "List<ItemDTO>", "fields": [{"name": "weight", "type": "Decimal"}]},
+                    ],
+                }
+            ]
+            payload["interfaces"][0]["case_ids"] = ["TC-A", "TC-B"]
+            write_json(raw_interface_path, payload)
+            core_path.write_text(
+                core_path.read_text(encoding="utf-8").replace("| TC-A | GenericController#read", "| TC-A, TC-B | GenericController#read"),
+                encoding="utf-8",
+            )
+            cases: dict[str, object] = json.loads(tapd_cases_path.read_text(encoding="utf-8"))
+            cases["total_count"] = 2
+            cases["cases"].append({"case_id": "TC-B", "title": "second case", "case_type": "boundary", "module": "generic"})
+            write_json(tapd_cases_path, cases)
+            evidence_index: dict[str, object] = json.loads(evidence_index_path.read_text(encoding="utf-8"))
+            evidence_index["artifacts"]["raw/testcase_interface_evidence.json"] = file_sha256(raw_interface_path)
+            evidence_index["artifacts"]["core_process_interfaces.md"] = file_sha256(core_path)
+            write_json(evidence_index_path, evidence_index)
+
+            model_mapping: dict[str, object] = build_model_mapping(
+                evidence_index_path,
+                tapd_cases_path,
+                unit_path,
+                core_path,
+                table_path,
+                SKILL_PATH,
+            )
+
+            self.assertEqual(model_mapping["generation_report"]["status"], "ready")
+            interface_case: dict[str, object] = model_mapping["interface_cases"][0]
+            self.assertEqual(len(interface_case["request_variants"]), 2)
+            self.assertEqual(
+                [parameter["name"] for parameter in interface_case["request_variants"][0]["parameters"]],
+                ["payload.resourceId", "payload.items.weight"],
+            )
+            self.assertTrue(all(len(variant["case_keys"]) == 1 for variant in interface_case["request_variants"]))
+
+    def test_model_mapping_uses_reviewed_core_case_scope_instead_of_raw_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root: Path = Path(raw_directory)
+            evidence_index_path, tapd_cases_path, unit_path, core_path, table_path = self.write_generation_fixture(
+                root,
+                [{"name": "resource_id", "data_type": "bigint"}],
+            )
+            raw_interface_path: Path = evidence_index_path.parent / "raw" / "testcase_interface_evidence.json"
+            payload: dict[str, object] = json.loads(raw_interface_path.read_text(encoding="utf-8"))
+            payload["interfaces"][0]["case_ids"] = ["TC-A", "TC-B"]
+            write_json(raw_interface_path, payload)
+            cases: dict[str, object] = json.loads(tapd_cases_path.read_text(encoding="utf-8"))
+            cases["total_count"] = 2
+            cases["cases"].append({"case_id": "TC-B", "title": "unreviewed candidate", "case_type": "boundary", "module": "generic"})
+            write_json(tapd_cases_path, cases)
+            evidence_index: dict[str, object] = json.loads(evidence_index_path.read_text(encoding="utf-8"))
+            evidence_index["artifacts"]["raw/testcase_interface_evidence.json"] = file_sha256(raw_interface_path)
+            write_json(evidence_index_path, evidence_index)
+
+            model_mapping: dict[str, object] = build_model_mapping(
+                evidence_index_path,
+                tapd_cases_path,
+                unit_path,
+                core_path,
+                table_path,
+                SKILL_PATH,
+            )
+
+            self.assertEqual(model_mapping["interface_cases"][0]["covered_case_keys"], [stable_case_key("TC-A")])
+            self.assertEqual(model_mapping["non_interface_cases"][0]["case_key"], stable_case_key("TC-B"))
+
     def test_query_plan_marks_missing_table_fields_without_placeholder_sql(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             root: Path = Path(raw_directory)

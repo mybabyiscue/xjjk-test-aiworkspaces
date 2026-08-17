@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Final
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -33,6 +34,41 @@ REQUIRED_REVIEW_ARTIFACTS: Final[tuple[str, ...]] = (
     "requirement_findings.md",
     "requirement_review_status.json",
 )
+
+CORE_PROCESS_INTERFACE_HEADERS: Final[tuple[str, ...]] = (
+    "用例编号",
+    "接口名称/描述",
+    "接口类型与地址",
+    "请求参数",
+    "返回参数",
+    "调用链路",
+    "代码位置",
+)
+UNIT_TEST_INTERFACE_HEADERS: Final[tuple[str, ...]] = (
+    "用例编号",
+    "方法签名",
+    "输入边界场景",
+    "需隔离的外部依赖",
+    "当前覆盖状态",
+    "代码位置",
+)
+TABLE_INFORMATION_HEADERS: Final[tuple[str, ...]] = (
+    "用例编号",
+    "所属平台",
+    "库.表名",
+    "物理注释",
+    "确认等级",
+    "判定依据说明",
+    "关键字段",
+    "读/写类型",
+    "租户隔离",
+)
+REVIEW_DOCUMENT_TABLE_HEADERS: Final[dict[str, tuple[str, ...]]] = {
+    "unit_test_interfaces.md": UNIT_TEST_INTERFACE_HEADERS,
+    "core_process_interfaces.md": CORE_PROCESS_INTERFACE_HEADERS,
+    "table_information.md": TABLE_INFORMATION_HEADERS,
+}
+MARKDOWN_SEPARATOR_CELL: Final[re.Pattern[str]] = re.compile(r":?-{3,}:?")
 
 
 def read_json_object(path: Path, label: str) -> dict[str, object]:
@@ -280,8 +316,57 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def markdown_table_lines(headers: tuple[str, ...]) -> tuple[str, str]:
+    return (
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join("---" for _ in headers) + "|",
+    )
+
+
+def first_markdown_table_headers(document: str) -> list[str]:
+    lines = document.splitlines()
+    for index in range(len(lines) - 1):
+        header_cells = markdown_cells(lines[index])
+        separator_cells = markdown_cells(lines[index + 1])
+        if (
+            header_cells
+            and len(header_cells) == len(separator_cells)
+            and all(MARKDOWN_SEPARATOR_CELL.fullmatch(cell) for cell in separator_cells)
+        ):
+            return header_cells
+    return []
+
+
+def markdown_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return []
+    return [cell.strip() for cell in stripped[1:-1].split("|")]
+
+
+def validate_review_document_schemas(run_dir: Path) -> None:
+    for relative_path, expected_headers in REVIEW_DOCUMENT_TABLE_HEADERS.items():
+        document_path = run_dir / relative_path
+        if not document_path.is_file():
+            raise FileNotFoundError(f"Missing review document: {document_path}")
+        actual_headers = first_markdown_table_headers(
+            document_path.read_text(encoding="utf-8-sig")
+        )
+        if actual_headers != list(expected_headers):
+            raise ValueError(
+                f"Invalid first Markdown table schema in {relative_path}; "
+                f"expected={list(expected_headers)}, actual={actual_headers}"
+            )
+
+
 def artifact_hashes(run_dir: Path) -> dict[str, str]:
-    return {
+    hashes: dict[str, str] = {
         relative_path: sha256_file(run_dir / relative_path)
         for relative_path in REQUIRED_REVIEW_ARTIFACTS
     }
+    raw_dir = run_dir / "raw"
+    for evidence_path in sorted(raw_dir.glob("*_evidence.json")):
+        relative_path = evidence_path.relative_to(run_dir).as_posix()
+        if relative_path not in hashes:
+            hashes[relative_path] = sha256_file(evidence_path)
+    return hashes

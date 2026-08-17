@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-08-10T16:49:01+08:00",
+  "last_updated": "2026-08-15T14:26:58+08:00",
   "entries": [
     {
       "id": "EXP-001",
@@ -64,6 +64,34 @@
       "source_run_id": "20260810_145724_code_source",
       "testcase_hash": "5bf43095dac86f27065856ddfd56fc8a39766814d129ddbe591daf972305715e",
       "approved_at": "2026-08-10T16:49:01+08:00"
+    },
+    {
+      "type": "approved_code_review",
+      "code_review_run_id": "20260815_103917_code_review",
+      "source_run_id": "20260814_145057_code_source",
+      "testcase_hash": "544ceda44fa885f31c9f1f1726dc010b06bfa9c5f3eeb69f4537e0a247d14ce3",
+      "approved_at": "2026-08-15T10:45:08+08:00"
+    },
+    {
+      "type": "approved_code_review",
+      "code_review_run_id": "20260815_114254_code_review",
+      "source_run_id": "20260814_145057_code_source",
+      "testcase_hash": "544ceda44fa885f31c9f1f1726dc010b06bfa9c5f3eeb69f4537e0a247d14ce3",
+      "approved_at": "2026-08-15T13:34:29+08:00"
+    },
+    {
+      "type": "approved_code_review",
+      "code_review_run_id": "20260815_140124_code_review",
+      "source_run_id": "20260814_145057_code_source",
+      "testcase_hash": "544ceda44fa885f31c9f1f1726dc010b06bfa9c5f3eeb69f4537e0a247d14ce3",
+      "approved_at": "2026-08-15T14:07:36+08:00"
+    },
+    {
+      "type": "approved_code_review",
+      "code_review_run_id": "20260815_142232_code_review",
+      "source_run_id": "20260814_145057_code_source",
+      "testcase_hash": "544ceda44fa885f31c9f1f1726dc010b06bfa9c5f3eeb69f4537e0a247d14ce3",
+      "approved_at": "2026-08-15T14:26:58+08:00"
     }
   ]
 }
