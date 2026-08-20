@@ -148,8 +148,9 @@ flowchart LR
 | 代码复审 Gate | 第四、五步 | `code_review_run_id` 与当前审批文件一致 |
 | API 环境 Gate | 第四、五步 | 用户从环境列表中明确选择一个环境 |
 | 数据库平台 Gate | 第三、四、五步 | 用户明确选择只读连接；需要 SQL 写入时另行确认受控写连接 |
-| Token Gate | 第四、五步 | 按 `token_probe` 验证 Token，或在环境具备完整登录能力时自动续期；无法安全验证或续期时暂停 |
+| Token Gate | 第四、五步 | 按环境中声明的探测端点和凭证引用校验 Token；配置不完整或 Token 失效时暂停，当前执行链不承诺自动续期 |
 | 数据变更 Gate | 第五步 | `environment_type=test` 且 `allow_test_data_mutation=true` |
+| 业务码断言 Gate | 第五步 | 用户明确确认响应体顶层 `code` 的期望值；未确认时不得执行 |
 
 即使列表中只有一个环境或数据库连接，也不得自动替用户选择。
 
@@ -186,7 +187,7 @@ python -m venv .venv
 
 ### 2. 配置本地凭证
 
-在 `config/credentials.local.json` 中维护 TAPD 和其他非 API 环境外部系统凭证。API 环境的账号、密码和 Token 直接维护在 `config/environments_config.json`。两个文件均已加入 `.gitignore`。
+在 `config/credentials.local.json` 中维护 TAPD 和 API 环境的本地凭证。准备阶段的 Token Gate 要求 `config/environments_config.json` 中的环境通过 `credentials_ref` 关联到本地凭证对象；执行器同时兼容环境对象内直接提供非空 `authorization` 的现有配置。不要把同一凭证复制到两种位置。
 
 凭证只允许保存在本地配置中，不得写入：
 
@@ -197,7 +198,7 @@ python -m venv .venv
 
 ### 3. 配置 API 环境
 
-`config/environments_config.json` 是 API 环境元数据、账号、密码和 Token 的唯一来源。`authorization` 按配置原值使用，不会自动添加或删除 `Bearer`。需要执行数据 setup 时，环境还必须明确声明为测试环境：
+`config/environments_config.json` 是 API 环境元数据和测试能力声明的来源。为保证第四步 Token Gate 可执行，环境至少需要声明测试环境、无副作用的 `healthcheck_url`、Token 失效码以及 `credentials_ref`；需要执行数据 setup 时，还必须明确声明为测试环境。`authorization` 按配置原值使用，不会自动添加或删除 `Bearer`：
 
 ```json
 {
@@ -207,30 +208,38 @@ python -m venv .venv
       "api_domain": "https://api.example.test",
       "environment_type": "test",
       "allow_test_data_mutation": true,
-      "login_url": "https://console.example.test/login",
-      "account": "LOCAL_ONLY",
-      "password": "LOCAL_ONLY",
-      "authorization": "LOCAL_ONLY",
-      "token_probe": {
-        "url": "https://api.example.test/verified-read-only-endpoint",
-        "headers": {},
-        "response_code_path": "$.code",
-        "success_codes": ["SUCCESS"],
-        "unauthorized_codes": ["TOKEN_EXPIRED"]
-      }
+      "healthcheck_url": "https://api.example.test/verified-read-only-endpoint",
+      "healthcheck_headers": {},
+      "healthcheck_success_code": "SUCCESS",
+      "healthcheck_unauthorized_codes": ["TOKEN_EXPIRED"],
+      "auth_header_name": "Authorization",
+      "credentials_ref": "environments.test"
     }
   ]
 }
 ```
 
-`token_probe` 和登录字段都是能力声明，不根据环境名称选择逻辑：
+对应的 `config/credentials.local.json` 至少需要包含被 `credentials_ref` 指向的本地凭证对象，例如：
 
-- 存在 `token_probe` 时，按其中的数据规则验证当前 Token。
-- Token 失效且 `login_url`、`account`、`password` 完整时，使用 Playwright 自动登录并原子更新当前环境的 `authorization`。
-- 没有 `token_probe` 但登录字段完整时，主动登录获取新 Token。
-- Token 无法验证且缺少完整登录能力时立即阻断。
+```json
+{
+  "environments": {
+    "test": {
+      "account": "LOCAL_ONLY",
+      "password": "LOCAL_ONLY",
+      "authorization": "LOCAL_ONLY"
+    }
+  }
+}
+```
 
-生产环境或未显式允许数据变更的环境不能运行 setup/cleanup。`credentials_ref`、`healthcheck_success_code` 和 `healthcheck_unauthorized_codes` 属于旧配置字段，不再使用。
+当前配置和代码仍兼容部分历史格式，实际工作区已经存在混合配置；准备 Skill 的顶层说明、reference 和校验脚本的配置契约尚未完全统一。实际执行时应以被调用脚本的参数和字段校验为准，不能仅配置 `token_probe` 或直接复制旧示例：
+
+- `validate_environment_token.py` 读取 `healthcheck_url`、`healthcheck_headers`、成功码、Token 失效码和 `credentials_ref`；仅配置 `token_probe` 不能替代这些字段。
+- 当前执行链不包含已验证的 Playwright 自动登录续期流程。Token 失效时应暂停执行，由用户更新本地凭证后重新进行 Token Gate。
+- `config/environments_config.example.json` 仍是旧格式示例，缺少完整准备流程所需的部分字段，不能直接复制后执行。
+
+生产环境或未显式允许数据变更的环境不能运行 setup/cleanup。`credentials_ref`、`healthcheck_success_code` 和 `healthcheck_unauthorized_codes` 是当前准备阶段 Token Gate 使用的字段，不应从配置中删除。
 
 ### 4. 配置数据库连接
 
@@ -290,6 +299,7 @@ python .codex/skills/test-execute-from-tapd/scripts/run_test_execution.py `
   --confirmation output/latest/testcase_confirmation.json `
   --environment-config config/environments_config.json `
   --environment-name "<用户确认的环境名称>" `
+  --expected-business-code "<用户本次明确确认的响应体 code>" `
   --connections config/connections.json `
   --read-connection-name "<需要数据库断言时确认的只读连接>" `
   --write-connection-name "<需要受控 SQL 时另行确认的写连接>" `
@@ -340,6 +350,7 @@ test-lane-control                Lane 生命周期管理
 ## 安全与 Git 规则
 
 - `config/credentials.local.json`、`config/environments_config.json` 和 `config/connections.json` 均为本地文件，不得提交。
+- `config/.git-credentials` 不是工作区支持的凭证文件，必须保持在 `.gitignore` 覆盖范围内，不得提交。
 - `output/`、`scratch/`、数据库缓存、Playwright 缓存和测试报告默认由 `.gitignore` 排除。
 - 不提交 Token、账号、密码、数据库连接或真实测试结果。
 - 未经用户明确要求，不创建 Git Commit。
@@ -356,7 +367,7 @@ python -m compileall -q .codex/skills/tapd-prepare-test-from/scripts .codex/skil
 git --no-pager diff --check
 ```
 
-并使用 `skill-creator/scripts/quick_validate.py` 分别校验两个 Skill 目录。
+当前工作区不包含仓库相对路径 `skill-creator/scripts/quick_validate.py`，不能按该相对路径执行额外校验；应以本节列出的测试、编译和 `diff --check` 为当前工作区可复现的最低验证集。
 
 ## 常见阻断原因
 
